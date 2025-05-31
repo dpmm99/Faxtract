@@ -143,7 +143,8 @@ public class LlamaExecutor : IDisposable
             }
 
             // Submit all prompts
-            var contextConsumed = 0;
+            var contextConsumed = _prePromptTokenCount;
+            var promptTokensPerConversation = new int[prompts.Count];
             for (var i = 0; i < prompts.Count; i++)
             {
                 //TODO: Need to also include the enclosing topic hierarchy so the flash cards know what context the *student* would have.
@@ -153,6 +154,7 @@ public class LlamaExecutor : IDisposable
 
                 var promptText = Encoding.UTF8.GetString(template.Apply());
                 var promptTokens = _executor!.Context.Tokenize(promptText);
+                promptTokensPerConversation[i] = promptTokens.Length;
                 contextConsumed += promptTokens.Length;
                 conversations[i].Prompt(promptTokens);
             }
@@ -168,8 +170,15 @@ public class LlamaExecutor : IDisposable
                 var result = await _executor!.Infer(cancellationToken);
                 if (result != DecodeResult.Ok)
                 {
-                    _logger.LogError("Batch inference failed after {ContextConsumed} tokens with result: {Result}", contextConsumed, result);
-                    Debugger.Break();
+                    _logger.LogError("Batch inference failed after {ContextConsumed} tokens with result: {Result}; dropping 1 conversation", contextConsumed, result);
+                    var disposeIndex = conversations.FindLastIndex(p => !p.IsDisposed);
+
+                    //Same as IsEndOfGeneration
+                    completedMask[disposeIndex] = true;
+                    lastTokenTexts[disposeIndex] = "";
+                    conversations[disposeIndex].Dispose();
+                    contextConsumed -= promptTokensPerConversation[disposeIndex] + tokensPerConversation[disposeIndex];
+                    continue;
                 }
 
                 // Sample and decode tokens for each active conversation
@@ -188,6 +197,10 @@ public class LlamaExecutor : IDisposable
                         completedMask[i] = true;
                         lastTokenTexts[i] = "";
                         conversations[i].Dispose(); // Free up some KV cache for the remaining conversations and wastes less time on inference for the dead conversation.
+                        //TODO: Can't find the source of the bug, not here and not in LlamaSharp, but it seems like promptTokensPerConversation isn't being freed when we dispose the conversation. Might actually be a bug in llama.cpp, as it reports the KV cache being reduced, but then we run into NoKvSlot too soon.
+
+                        // Subtract this conversation's tokens from contextConsumed because disposing this conversation frees some KV cache
+                        contextConsumed -= promptTokensPerConversation[i] + tokensPerConversation[i];
                         continue;
                     }
 
@@ -214,6 +227,16 @@ public class LlamaExecutor : IDisposable
 
                 contextConsumed += newTokens;
             }
+
+            // Update once more so the UI doesn't repeat the last token
+            ProgressChanged?.Invoke(new BatchProgress(
+                    contextMaxTokens,
+                    contextConsumed,
+                    0,
+                    new string[prompts.Count],
+                    [.. completedMask],
+                    [.. tokensPerConversation]
+                ));
 
             // Collect final responses
             return responses.ConvertAll(p => p.ToString());

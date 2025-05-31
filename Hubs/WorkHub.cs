@@ -13,7 +13,6 @@ public class WorkHub(IWorkProvider workProvider) : Hub
             workProvider.GetRemainingCount(),
             WorkProcessor.CurrentWork,
             WorkProcessor.TokensPerSecond,
-            WorkProcessor.TotalTokensProcessed,
-            WorkProcessor.MaxTokens);
+            WorkProcessor.TotalTokensProcessed);
     }
 }

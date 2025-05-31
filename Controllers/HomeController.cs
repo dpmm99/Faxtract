@@ -28,7 +28,7 @@ namespace Faxtract.Controllers
                 using var streamReader = new StreamReader(file.OpenReadStream());
 
                 var fileChunks = new List<TextChunk>();
-                await foreach (var chunk in chunker.ChunkStreamAsync(streamReader))
+                await foreach (var chunk in chunker.ChunkStreamAsync(streamReader, file.FileName))
                 {
                     fileChunks.Add(chunk);
                 }

@@ -175,7 +175,6 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
             workProvider.GetRemainingCount(),
             CurrentWork,
             TokensPerSecond,
-            TotalTokensProcessed,
-            MaxTokens);
+            TotalTokensProcessed);
     }
 }

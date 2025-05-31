@@ -6,7 +6,7 @@ namespace Faxtract.Services;
 
 public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
 {
-    public async IAsyncEnumerable<TextChunk> ChunkStreamAsync(StreamReader reader)
+    public async IAsyncEnumerable<TextChunk> ChunkStreamAsync(StreamReader reader, string fileId)
     {
         var buffer = new StringBuilder();
         var position = 0;
@@ -31,7 +31,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
                     var textToProcess = buffer.ToString(0, lastNewLine);
                     buffer.Remove(0, lastNewLine + 1);
 
-                    foreach (var chunk in ProcessText(textToProcess, position))
+                    foreach (var chunk in ProcessText(textToProcess, position, fileId))
                     {
                         yield return chunk;
                         position = chunk.EndPosition;
@@ -43,7 +43,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
         // Process any remaining text
         if (buffer.Length > 0)
         {
-            foreach (var chunk in ProcessText(buffer.ToString(), position))
+            foreach (var chunk in ProcessText(buffer.ToString(), position, fileId))
             {
                 yield return chunk;
                 position = chunk.EndPosition;
@@ -51,7 +51,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
         }
     }
 
-    private IEnumerable<TextChunk> ProcessText(string text, int position)
+    private IEnumerable<TextChunk> ProcessText(string text, int position, string fileId)
     {
         var sections = SplitByStructure(text);
         var currentSection = new StringBuilder();
@@ -64,7 +64,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
             if (combinedTokens > maxChunkSize && currentSection.Length > 0)
             {
                 // Yield current accumulated section before processing the new one
-                yield return new TextChunk(currentSection.ToString(), sectionStart, position);
+                yield return new TextChunk(currentSection.ToString(), sectionStart, position, fileId);
                 currentSection.Clear();
                 sectionStart = position;
             }
@@ -74,12 +74,12 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
                 // If current section is empty, process oversized section
                 if (currentSection.Length > 0)
                 {
-                    yield return new TextChunk(currentSection.ToString(), sectionStart, position);
+                    yield return new TextChunk(currentSection.ToString(), sectionStart, position, fileId);
                     currentSection.Clear();
                     sectionStart = position;
                 }
 
-                foreach (var chunk in ChunkSection(section, position))
+                foreach (var chunk in ChunkSection(section, position, fileId))
                 {
                     position = chunk.EndPosition;
                     yield return chunk;
@@ -95,11 +95,11 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
         // Don't forget remaining text
         if (currentSection.Length > 0)
         {
-            yield return new TextChunk(currentSection.ToString(), sectionStart, position);
+            yield return new TextChunk(currentSection.ToString(), sectionStart, position, fileId);
         }
     }
 
-    private IEnumerable<TextChunk> ChunkSection(string section, int position)
+    private IEnumerable<TextChunk> ChunkSection(string section, int position, string fileId)
     {
         var sentences = SplitBySentences(section);
         var currentChunk = new StringBuilder();
@@ -112,7 +112,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
 
             if (potentialChunkTokens > maxChunkSize && currentChunk.Length > 0)
             {
-                yield return new TextChunk(currentChunk.ToString(), chunkStart, position);
+                yield return new TextChunk(currentChunk.ToString(), chunkStart, position, fileId);
                 chunkStart = position;
                 currentChunk.Clear();
                 hasContent = false;
@@ -126,7 +126,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
             if (EstimateTokenCount(currentChunk.ToString()) >= preferredMinSize &&
                 !IsIncompleteSection(sentences.Last(), sentence))
             {
-                yield return new TextChunk(currentChunk.ToString(), chunkStart, position);
+                yield return new TextChunk(currentChunk.ToString(), chunkStart, position, fileId);
                 chunkStart = position;
                 currentChunk.Clear();
                 hasContent = false;
@@ -136,7 +136,7 @@ public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
         // Always process remaining content, regardless of size
         if (hasContent)
         {
-            yield return new TextChunk(currentChunk.ToString(), chunkStart, position);
+            yield return new TextChunk(currentChunk.ToString(), chunkStart, position, fileId);
         }
     }
 

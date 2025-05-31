@@ -1,6 +1,6 @@
 @addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
 @{
-    ViewData["Title"] = "Work Processor";
+    ViewData["Title"] = "Upload";
 }
 
 <div class="container">
@@ -14,7 +14,7 @@
     <div class="status">
         <p>Processed: <span id="processed">0</span></p>
         <p>Remaining: <span id="remaining">0</span></p>
-        <p>Tokens Generated: <span id="tokensGenerated">0</span>/<span id="maxTokens">0</span></p>
+        <p>Tokens Generated: <span id="tokensGenerated">0</span></p>
         <p>Processing Speed: <span id="tokensPerSecond">-</span> tokens/sec</p>
     </div>
 
@@ -45,6 +45,7 @@
             .then(data => {
                 if (data.success) {
                     uploadStatus.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+                    document.getElementById('uploadForm').elements.files.value = null;
                 } else {
                     uploadStatus.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
                 }
@@ -61,12 +62,11 @@
         // Map to track DOM elements for each work item
         const workItemElements = new Map();
 
-        connection.on("UpdateStatus", (processed, remaining, currentWork, tokensPerSecond, totalTokens, maxTokens) => {
+        connection.on("UpdateStatus", (processed, remaining, currentWork, tokensPerSecond, totalTokens) => {
             // Update status counters directly
             document.getElementById("processed").textContent = processed;
             document.getElementById("remaining").textContent = remaining;
             document.getElementById("tokensGenerated").textContent = totalTokens || "0";
-            document.getElementById("maxTokens").textContent = maxTokens || "0";
             document.getElementById("tokensPerSecond").textContent =
                 tokensPerSecond ? tokensPerSecond.toFixed(1) : "-";
 
@@ -76,7 +76,7 @@
             const currentChunkIds = new Set();
             currentWork.forEach(w => {
                 if (w.id && w.id.startPosition !== undefined && w.id.endPosition !== undefined) {
-                    currentChunkIds.add(`${w.id.startPosition}-${w.id.endPosition}`);
+                    currentChunkIds.add(`${w.id.fileId || ''}-${w.id.startPosition}-${w.id.endPosition}`);
                 }
             });
 
@@ -93,7 +93,7 @@
             // Process each work item
             currentWork.forEach(w => {
                 const key = w.id && w.id.startPosition !== undefined ?
-                    `${w.id.startPosition}-${w.id.endPosition}` :
+                    `${w.id.fileId || ''}-${w.id.startPosition}-${w.id.endPosition}` :
                     JSON.stringify(w.id);
 
                 const newToken = w.response ?? '';
@@ -160,7 +160,7 @@
     </script>
 
     <style>
-        .container { max-width: 800px; margin: 20px auto; }
+        .container { max-width: 25em; margin: 20px auto; }
         .work-item { border: 1px solid #ddd; margin: 10px 0; padding: 10px; }
         .status { margin: 20px 0; }
         pre.response-content {
@@ -194,7 +194,7 @@
             padding: 8px;
             border-radius: 4px;
             margin-bottom: 10px;
-            width: 100%;
+            width: calc(100% - 16px); /*Take off the padding*/
         }
 
         button[type="submit"] {
