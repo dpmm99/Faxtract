@@ -117,7 +117,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
     private string SaveToJsonFile<T>(T data)
     {
         var guid = Guid.NewGuid().ToString();
-        var filePath = $"{guid}.json";
+        var filePath = Path.Join(AppContext.BaseDirectory, $"{guid}.json");
 
         File.WriteAllText(filePath, JsonSerializer.Serialize(data));
 

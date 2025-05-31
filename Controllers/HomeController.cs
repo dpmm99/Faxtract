@@ -1,4 +1,5 @@
 ﻿using Faxtract.Interfaces;
+using Faxtract.Models;
 using Faxtract.Services;
 using Microsoft.AspNetCore.Mvc;
 
@@ -12,22 +13,37 @@ namespace Faxtract.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> UploadFile(IFormFile file)
+        public async Task<IActionResult> UploadFile([FromForm] List<IFormFile> files)
         {
-            if (file == null || file.Length == 0)
+            if (files == null || !files.Any() || files.All(f => f.Length == 0))
             {
-                return BadRequest("No file uploaded");
+                return BadRequest(new { success = false, message = "No files uploaded" });
             }
 
+            int totalChunks = 0;
             var chunker = new TextChunker();
-            using var streamReader = new StreamReader(file.OpenReadStream());
 
-            await foreach (var chunk in chunker.ChunkStreamAsync(streamReader))
+            foreach (var file in files)
             {
-                workProvider.AddWork([chunk]);
+                using var streamReader = new StreamReader(file.OpenReadStream());
+
+                var fileChunks = new List<TextChunk>();
+                await foreach (var chunk in chunker.ChunkStreamAsync(streamReader))
+                {
+                    fileChunks.Add(chunk);
+                }
+
+                workProvider.AddWork(fileChunks);
+                totalChunks += fileChunks.Count;
             }
 
-            return RedirectToAction(nameof(Index));
+            return Json(new
+            {
+                success = true,
+                filesProcessed = files.Count,
+                chunksAdded = totalChunks,
+                message = $"Successfully uploaded {files.Count} file(s) and added {totalChunks} chunks for processing."
+            });
         }
     }
 }

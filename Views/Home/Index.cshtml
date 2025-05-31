@@ -4,11 +4,12 @@
 }
 
 <div class="container">
-    <form method="post" enctype="multipart/form-data" asp-controller="Home" asp-action="UploadFile">
+    <form method="post" enctype="multipart/form-data" id="uploadForm">
         <div asp-validation-summary="All" class="text-danger"></div>
-        <input type="file" name="file" accept=".txt" />
+        <input type="file" name="files" accept=".txt" multiple />
         <button type="submit">Upload</button>
     </form>
+    <div id="upload-status" class="mt-3"></div>
 
     <div class="status">
         <p>Processed: <span id="processed">0</span></p>
@@ -27,6 +28,31 @@
             .withUrl("/workhub")
             .withAutomaticReconnect()
             .build();
+
+        // Add form submission handler to prevent default redirect
+        document.getElementById('uploadForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            const formData = new FormData(this);
+            const uploadStatus = document.getElementById('upload-status');
+            uploadStatus.innerHTML = '<div class="alert alert-info">Uploading files...</div>';
+
+            fetch('@Url.Action("UploadFile", "Home")', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    uploadStatus.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+                } else {
+                    uploadStatus.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+                }
+            })
+            .catch(error => {
+                uploadStatus.innerHTML = `<div class="alert alert-danger">Upload failed: ${error.message}</div>`;
+            });
+        });
 
         // Track complete responses for each chunk using position as identifier
         let responseHistory = new Map();
@@ -146,6 +172,101 @@
             padding: 8px;
             border-radius: 4px;
             overflow-x: auto;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f5f5;
+        }
+
+        #uploadForm {
+            background-color: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        input[type="file"] {
+            border: 1px solid #ddd;
+            padding: 8px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            width: 100%;
+        }
+
+        button[type="submit"] {
+            background-color: #4a6da7;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+
+            button[type="submit"]:hover {
+                background-color: #3a5a8a;
+            }
+
+        .alert {
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+
+        .alert-info {
+            background-color: #e8f4fd;
+            border-left: 4px solid #4a90e2;
+            color: #1a5186;
+        }
+
+        .alert-success {
+            background-color: #e9f7ef;
+            border-left: 4px solid #2ecc71;
+            color: #1d8348;
+        }
+
+        .alert-danger {
+            background-color: #fdecea;
+            border-left: 4px solid #e74c3c;
+            color: #922b21;
+        }
+
+        .status {
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 15px;
+        }
+
+            .status p {
+                display: flex;
+                justify-content: space-between;
+                margin: 5px 0;
+                padding: 5px 0;
+                border-bottom: 1px solid #f0f0f0;
+            }
+
+                .status p:last-child {
+                    border-bottom: none;
+                }
+
+        .status-line {
+            font-weight: 500;
+            color: #555;
+            margin-bottom: 8px;
+        }
+
+        .mt-3 {
+            margin-top: 15px;
+        }
+
+        #currentWork {
+            margin-top: 20px;
         }
     </style>
 }

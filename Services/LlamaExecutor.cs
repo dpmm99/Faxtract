@@ -44,7 +44,7 @@ public class LlamaExecutor : IDisposable
             //TODO: Could support appsettings for TypeK, TypeV, etc.
         };
 
-        _prePromptFile = _config["PrePromptFile"] ?? "preprompt.state";
+        _prePromptFile = Path.Join(AppContext.BaseDirectory, _config["PrePromptFile"] ?? "preprompt.state");
         _prePromptText = _config["PrePromptText"] ?? string.Empty;
 
         InitializeExecutor();
