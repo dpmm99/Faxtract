@@ -40,8 +40,11 @@ public class LlamaExecutor : IDisposable
             Threads = _config.GetValue("Threads", Environment.ProcessorCount),
             GpuLayerCount = _config.GetValue("GpuLayerCount", 0),
             FlashAttention = true,
-
-            //TODO: Could support appsettings for TypeK, TypeV, etc.
+            TensorBufferOverrides = [.. _config.GetValue("TensorBufferOverrides", string.Empty).Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => p.Split('=', StringSplitOptions.RemoveEmptyEntries))
+                .Select(p => new LLama.Abstractions.TensorBufferOverride(p[0], p[1]))],
+            TypeK = Enum.Parse<GGMLType>(_config.GetValue("TypeK", nameof(GGMLType.GGML_TYPE_Q8_0)), true), //Note: Other than both Q8_0 or F16, these options generally just crash llama.cpp. Tried F16/Q8_0 and Q8_0/Q4_0, for example, and those both crash. So it pretty much has to be F16/F16 or Q8_0/Q8_0.
+            TypeV = Enum.Parse<GGMLType>(_config.GetValue("TypeV", nameof(GGMLType.GGML_TYPE_Q8_0)), true),
         };
 
         _prePromptFile = Path.Join(AppContext.BaseDirectory, _config["PrePromptFile"] ?? "preprompt.state");
