@@ -4,7 +4,7 @@ using System.Text.RegularExpressions;
 
 namespace Faxtract.Services;
 
-public class TextChunker(int maxChunkSize = 800, int preferredMinSize = 600)
+public class TextChunker(int maxChunkSize = 700, int preferredMinSize = 500)
 {
     public async IAsyncEnumerable<TextChunk> ChunkStreamAsync(StreamReader reader, string fileId)
     {

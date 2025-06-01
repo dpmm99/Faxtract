@@ -151,7 +151,6 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
             _ = BroadcastStatus();
         });
 
-        _totalTokensProcessed = 0;
         executor.ProgressChanged += progressHandler;
         try
         {
