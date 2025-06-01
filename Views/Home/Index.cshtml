@@ -1,21 +1,23 @@
-@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+﻿@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
 @{
     ViewData["Title"] = "Upload";
 }
 
 <div class="container">
-    <form method="post" enctype="multipart/form-data" id="uploadForm">
-        <div asp-validation-summary="All" class="text-danger"></div>
-        <input type="file" name="files" accept=".txt" multiple />
-        <button type="submit">Upload</button>
-    </form>
-    <div id="upload-status" class="mt-3"></div>
+    <div class="top-container">
+        <form method="post" enctype="multipart/form-data" id="uploadForm">
+            <div asp-validation-summary="All" class="text-danger"></div>
+            <input type="file" name="files" accept=".txt" multiple />
+            <button type="submit">Upload</button>
+        </form>
+        <div id="upload-status" class="mt-3"></div>
 
-    <div class="status">
-        <p>Processed: <span id="processed">0</span></p>
-        <p>Remaining: <span id="remaining">0</span></p>
-        <p>Tokens Generated: <span id="tokensGenerated">0</span></p>
-        <p>Processing Speed: <span id="tokensPerSecond">-</span> tokens/sec</p>
+        <div class="status">
+            <p>Processed: <span id="processed">0</span></p>
+            <p>Remaining: <span id="remaining">0</span></p>
+            <p>Tokens Generated: <span id="tokensGenerated">0</span></p>
+            <p>Processing Speed: <span id="tokensPerSecond">-</span> tokens/sec</p>
+        </div>
     </div>
 
     <div id="currentWork"></div>
@@ -107,10 +109,14 @@
 
                     const statusEl = document.createElement('div');
                     statusEl.className = 'status-line';
+                    statusEl.addEventListener('click', function() { // Make it toggleable
+                        workItemEl.classList.toggle('collapsed');
+                    });
                     workItemEl.appendChild(statusEl);
 
                     const responseLabel = document.createElement('div');
                     responseLabel.textContent = 'Response:';
+                    responseLabel.className = 'response-label';
                     workItemEl.appendChild(responseLabel);
 
                     const responseEl = document.createElement('pre');
@@ -160,8 +166,70 @@
     </script>
 
     <style>
-        .container { max-width: 25em; margin: 20px auto; }
-        .work-item { border: 1px solid #ddd; margin: 10px 0; padding: 10px; }
+        .container { margin: 20px auto; }
+        .top-container { max-width: 25em; margin: 0 auto; }
+
+        #currentWork {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 20px;
+            justify-content: center;
+        }
+
+        /* Updated work-item styling for side-by-side and collapsible */
+        .work-item {
+            border: 1px solid #ddd;
+            margin: 0;
+            padding: 10px;
+            border-radius: 6px;
+            flex: 1 1 calc(50% - 15px); /* Two items per row with gap */
+            min-width: 20em;
+            max-width: 55em;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: all 0.2s ease;
+        }
+
+        /* Make items full width on smaller screens */
+        @@media (max-width: 768px) {
+            .work-item
+            {
+                flex: 1 1 100%;
+            }
+        }
+
+        /* Styling for collapsible elements */
+        .status-line {
+            font-weight: 500;
+            color: #555;
+            margin-bottom: 8px;
+            cursor: pointer;
+            padding: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-radius: 4px;
+        }
+
+            .status-line:hover {
+                background-color: #f0f0f0;
+            }
+
+            .status-line::after {
+                content: "\25BC";
+                font-size: 0.8em;
+                transition: transform 0.2s;
+            }
+
+        .work-item.collapsed .status-line::after {
+            transform: rotate(-90deg);
+        }
+
+        .work-item.collapsed .response-label,
+        .work-item.collapsed .response-content {
+            display: none;
+        }
+
         .status { margin: 20px 0; }
         pre.response-content {
             white-space: pre-wrap;
@@ -255,18 +323,8 @@
                     border-bottom: none;
                 }
 
-        .status-line {
-            font-weight: 500;
-            color: #555;
-            margin-bottom: 8px;
-        }
-
         .mt-3 {
             margin-top: 15px;
         }
-
-        #currentWork {
-            margin-top: 20px;
-        }
-    </style>
+   </style>
 }
