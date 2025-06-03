@@ -11,7 +11,7 @@ document.getElementById('uploadForm').addEventListener('submit', function (e) {
     const uploadStatus = document.getElementById('upload-status');
     uploadStatus.innerHTML = '<div class="alert alert-info">Uploading files...</div>';
 
-    fetch('@Url.Action("UploadFile", "Home")', {
+    fetch('Home/UploadFile', {
         method: 'POST',
         body: formData
     })
