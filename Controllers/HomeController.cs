@@ -13,7 +13,7 @@ namespace Faxtract.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> UploadFile([FromForm] List<IFormFile> files)
+        public async Task<IActionResult> UploadFile([FromForm] List<IFormFile> files, [FromForm] string? extraContext = null)
         {
             if (files == null || !files.Any() || files.All(f => f.Length == 0))
             {
@@ -28,7 +28,8 @@ namespace Faxtract.Controllers
                 using var streamReader = new StreamReader(file.OpenReadStream());
 
                 var fileChunks = new List<TextChunk>();
-                await foreach (var chunk in chunker.ChunkStreamAsync(streamReader, file.FileName))
+                // Pass the extraContext directly to the ChunkStreamAsync method
+                await foreach (var chunk in chunker.ChunkStreamAsync(streamReader, file.FileName, extraContext))
                 {
                     fileChunks.Add(chunk);
                 }

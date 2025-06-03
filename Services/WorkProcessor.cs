@@ -114,10 +114,11 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
         }
     }
 
-    private string SaveToJsonFile<T>(T data)
+    private static string SaveToJsonFile<T>(T data)
     {
         var guid = Guid.NewGuid().ToString();
-        var filePath = Path.Join(AppContext.BaseDirectory, $"{guid}.json");
+        Directory.CreateDirectory(Path.Join(AppContext.BaseDirectory, "out"));
+        var filePath = Path.Join(AppContext.BaseDirectory, "out", $"{guid}.json");
 
         File.WriteAllText(filePath, JsonSerializer.Serialize(data));
 
@@ -128,6 +129,9 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
     {
         // Prepare prompts for each chunk
         var prompts = batch.ConvertAll(chunk => chunk.Content);
+
+        // Get extra contexts to pass to the executor
+        var extraContexts = batch.ConvertAll(chunk => chunk.ExtraContext);
 
         // Subscribe to progress updates
         var progressHandler = new Action<LlamaExecutor.BatchProgress>(progress =>
@@ -154,7 +158,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
         executor.ProgressChanged += progressHandler;
         try
         {
-            var responses = await executor.GenerateResponses(prompts, 0, ct);
+            var responses = await executor.GenerateResponses(prompts, extraContexts, 0, ct);
             // Parse FlashCards only once at the end
             return responses.Zip(batch)
                 .SelectMany(pair => FlashCard.ParseFromText(pair.First, pair.Second))

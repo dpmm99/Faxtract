@@ -22,6 +22,9 @@ public class Program
 
         var app = builder.Build();
 
+        // Delete the state file if present, in case the model has changed.
+        File.Delete(Path.Join(AppContext.BaseDirectory, app.Configuration["PrePromptFile"] ?? "preprompt.state"));
+
         // Configure the HTTP request pipeline.
         if (!app.Environment.IsDevelopment())
         {
