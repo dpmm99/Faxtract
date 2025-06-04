@@ -10,6 +10,9 @@ public class FlashCard
 
     public static IEnumerable<FlashCard> ParseFromText(string text, TextChunk origin)
     {
+        var thinkPos = text.IndexOf("</think>");
+        if (thinkPos >= 0) text = text[(thinkPos + "</think>".Length)..];
+
         var lines = text.Split('\n');
         int currentIndex = 0;
 

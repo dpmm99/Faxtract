@@ -36,7 +36,8 @@ public class LlamaExecutor : IDisposable
         int GroupExtraContextTokens = 0,
         int GroupID = 0,
         bool IsCompleted = false,
-        HashSet<string>? LineHistory = null);
+        Dictionary<string, int>? LineHistory = null,
+        bool IsInThinkingMode = false);
 
     public record BatchProgress(int ContextMaxTokens, int UsedTokens, int NewTokens, IReadOnlyList<string> CurrentResponses, bool[] CompletedMask, IReadOnlyList<int> TokensPerResponse);
 
@@ -345,19 +346,65 @@ public class LlamaExecutor : IDisposable
                     // Get the last line from the StringBuilder
                     string lastLine = GetLastLine(updatedItem.ResponseBuilder);
 
-                    if (updatedItem.LineHistory == null) updatedItem = updatedItem with { LineHistory = new HashSet<string>(StringComparer.OrdinalIgnoreCase) };
+                    bool isThinkingStart = lastLine.Contains("<think>");
+                    bool isThinkingEnd = lastLine.Contains("</think>");
+
+                    // Update thinking mode state
+                    bool wasInThinkingMode = updatedItem.IsInThinkingMode;
+                    bool isInThinkingMode = isThinkingStart || (wasInThinkingMode && !isThinkingEnd);
+
+                    // Initialize line history if needed
+                    if (updatedItem.LineHistory == null)
+                    {
+                        updatedItem = updatedItem with
+                        {
+                            LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase),
+                            IsInThinkingMode = isInThinkingMode
+                        };
+                    }
+                    else
+                    {
+                        updatedItem = updatedItem with { IsInThinkingMode = isInThinkingMode };
+                    }
+
+                    // Reset line history counts if we're exiting thinking mode
+                    if (isThinkingEnd && wasInThinkingMode)
+                    {
+                        updatedItem = updatedItem with
+                        {
+                            LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                        };
+                    }
 
                     // Check if this line is a duplicate and not empty
-                    if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2 && !updatedItem.LineHistory.Add(lastLine))
+                    if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2)
                     {
-                        _logger.LogWarning("Conversation terminated due to repeating itself: {Line}", lastLine);
+                        // Track the line and its count
+                        if (updatedItem.LineHistory.TryGetValue(lastLine, out int count))
+                        {
+                            // Line already exists, increment count
+                            updatedItem.LineHistory[lastLine] = count + 1;
 
-                        // This is a duplicate line - remove it from the StringBuilder
-                        RemoveLastLine(updatedItem.ResponseBuilder);
+                            // Check if we've exceeded the allowed repetition limit
+                            int maxRepeats = updatedItem.IsInThinkingMode ? 3 : 0;
 
-                        // It's most likely stuck repeating itself, as smaller models especially tend to do, so just stop it here.
-                        contextConsumed = EndConversation(inferenceItems, contextConsumed, i, updatedItem);
-                        continue;
+                            if (count >= maxRepeats)
+                            {
+                                _logger.LogWarning("Conversation terminated due to repeating itself: {Line} (repeated {Count} times)", lastLine, count + 1);
+
+                                // This is a duplicate line - remove it from the StringBuilder
+                                RemoveLastLine(updatedItem.ResponseBuilder);
+
+                                // It's most likely stuck repeating itself, as smaller models especially tend to do, so just stop it here.
+                                contextConsumed = EndConversation(inferenceItems, contextConsumed, i, updatedItem);
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            // New line, add to dictionary with count 1
+                            updatedItem.LineHistory[lastLine] = 1;
+                        }
                     }
                 }
 
