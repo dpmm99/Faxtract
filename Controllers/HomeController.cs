@@ -83,7 +83,6 @@ namespace Faxtract.Controllers
                     // Process PDF file
                     await using var stream = file.OpenReadStream();
                     var pdfText = ExtractTextFromPdf(stream);
-                    using var pdfTextReader = new StringReader(pdfText);
                     using var streamReader = new StreamReader(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(pdfText)));
 
                     // Process the extracted text
@@ -130,8 +129,30 @@ namespace Faxtract.Controllers
 
             foreach (var page in pdfDocument.GetPages())
             {
-                var pageText = page.Text;
-                textBuilder.AppendLine(pageText);
+                var letters = page.Letters;
+
+                // Code from the readme
+                // 1. Extract words using nearest neighbor approach
+                var wordExtractor = UglyToad.PdfPig.DocumentLayoutAnalysis.WordExtractor.NearestNeighbourWordExtractor.Instance;
+                var words = wordExtractor.GetWords(letters);
+
+                // 2. Segment page to detect text blocks/paragraphs
+                var pageSegmenter = UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter.DocstrumBoundingBoxes.Instance;
+                var textBlocks = pageSegmenter.GetBlocks(words);
+
+                // 3. Sort blocks in reading order
+                var readingOrder = UglyToad.PdfPig.DocumentLayoutAnalysis.ReadingOrderDetector.UnsupervisedReadingOrderDetector.Instance;
+
+                // Extract text from blocks preserving structure
+                foreach (var block in (IEnumerable<UglyToad.PdfPig.DocumentLayoutAnalysis.TextBlock>)readingOrder.Get(textBlocks))
+                {
+                    textBuilder.Append(block.Text);
+                    textBuilder.AppendLine(); // Add line break between blocks
+                    textBuilder.AppendLine(); // Extra line break for paragraph separation
+                }
+
+                // Page separator
+                textBuilder.AppendLine("---");
             }
 
             return textBuilder.ToString();
