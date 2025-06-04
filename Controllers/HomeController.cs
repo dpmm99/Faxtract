@@ -76,13 +76,32 @@ namespace Faxtract.Controllers
 
             foreach (var file in files)
             {
-                using var streamReader = new StreamReader(file.OpenReadStream());
-
                 var fileChunks = new List<TextChunk>();
-                // Pass the extraContext directly to the ChunkStreamAsync method
-                await foreach (var chunk in chunker.ChunkStreamAsync(stripHtml ? ConvertHtmlToPlainText(streamReader) : streamReader, file.FileName, extraContext))
+                // Check if file is PDF
+                if (Path.GetExtension(file.FileName).Equals(".pdf", StringComparison.OrdinalIgnoreCase))
                 {
-                    fileChunks.Add(chunk);
+                    // Process PDF file
+                    await using var stream = file.OpenReadStream();
+                    var pdfText = ExtractTextFromPdf(stream);
+                    using var pdfTextReader = new StringReader(pdfText);
+                    using var streamReader = new StreamReader(new MemoryStream(System.Text.Encoding.UTF8.GetBytes(pdfText)));
+
+                    // Process the extracted text
+                    await foreach (var chunk in chunker.ChunkStreamAsync(streamReader, file.FileName, extraContext))
+                    {
+                        fileChunks.Add(chunk);
+                    }
+                }
+                else
+                {
+                    // Process non-PDF file
+                    using var streamReader = new StreamReader(file.OpenReadStream());
+
+                    // Pass the extraContext directly to the ChunkStreamAsync method
+                    await foreach (var chunk in chunker.ChunkStreamAsync(stripHtml ? ConvertHtmlToPlainText(streamReader) : streamReader, file.FileName, extraContext))
+                    {
+                        fileChunks.Add(chunk);
+                    }
                 }
 
                 await storageService.SaveAsync(fileChunks);
@@ -97,6 +116,25 @@ namespace Faxtract.Controllers
                 chunksAdded = totalChunks,
                 message = $"Successfully uploaded {files.Count} file(s) and added {totalChunks} chunks for processing."
             });
+        }
+
+        /// <summary>
+        /// Extracts text content from a PDF file via PdfPig
+        /// </summary>
+        /// <param name="pdfStream">The PDF file stream</param>
+        /// <returns>Extracted text from all pages of the PDF</returns>
+        private static string ExtractTextFromPdf(Stream pdfStream)
+        {
+            using var pdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfStream);
+            var textBuilder = new System.Text.StringBuilder();
+
+            foreach (var page in pdfDocument.GetPages())
+            {
+                var pageText = page.Text;
+                textBuilder.AppendLine(pageText);
+            }
+
+            return textBuilder.ToString();
         }
 
         //Can't stream HTML to plain text, so we read the whole thing into memory first

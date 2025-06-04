@@ -24,7 +24,7 @@ public class LlamaExecutor : IDisposable
     // Event for progress reporting
     public event Action<BatchProgress>? ProgressChanged;
 
-    private record InferenceItem(
+    private class InferenceItem(
         StringBuilder ResponseBuilder,
         DistributionSamplingPipelineThatStops Sampler,
         StreamingTokenDecoder Decoder,
@@ -37,7 +37,22 @@ public class LlamaExecutor : IDisposable
         int GroupID = 0,
         bool IsCompleted = false,
         Dictionary<string, int>? LineHistory = null,
-        bool IsInThinkingMode = false);
+        bool IsInThinkingMode = false)
+    {
+        public StringBuilder ResponseBuilder { get; init; } = ResponseBuilder;
+        public DistributionSamplingPipelineThatStops Sampler { get; init; } = Sampler;
+        public StreamingTokenDecoder Decoder { get; init; } = Decoder;
+        public Conversation Conversation { get; init; } = Conversation;
+        public int OriginalIndex { get; init; } = OriginalIndex;
+        public string LastTokenText { get; set; } = LastTokenText;
+        public int TokensGenerated { get; set; } = TokensGenerated;
+        public int PromptTokens { get; set; } = PromptTokens;
+        public int GroupExtraContextTokens { get; set; } = GroupExtraContextTokens;
+        public int GroupID { get; set; } = GroupID;
+        public bool IsCompleted { get; set; } = IsCompleted;
+        public Dictionary<string, int>? LineHistory { get; set; } = LineHistory;
+        public bool IsInThinkingMode { get; set; } = IsInThinkingMode;
+    }
 
     public record BatchProgress(int ContextMaxTokens, int UsedTokens, int NewTokens, IReadOnlyList<string> CurrentResponses, bool[] CompletedMask, IReadOnlyList<int> TokensPerResponse);
 
@@ -306,7 +321,7 @@ public class LlamaExecutor : IDisposable
                 var disposeItemIndex = inferenceItems.FindLastIndex(item => !item.Conversation.IsDisposed && !item.IsCompleted);
                 if (disposeItemIndex >= 0)
                 {
-                    contextConsumed = EndConversation(inferenceItems, contextConsumed, disposeItemIndex, inferenceItems[disposeItemIndex]);
+                    contextConsumed = EndConversation(inferenceItems, contextConsumed, inferenceItems[disposeItemIndex]);
                 }
 
                 continue;
@@ -317,99 +332,86 @@ public class LlamaExecutor : IDisposable
             for (var i = 0; i < inferenceItems.Count; i++)
             {
                 var item = inferenceItems[i];
+                item.LastTokenText = "";
                 if (item.IsCompleted || item.Conversation.RequiresInference) continue;
 
                 newTokens++;
-                var updatedItem = item with { TokensGenerated = item.TokensGenerated + 1 };
+                item.TokensGenerated++;
 
-                var token = updatedItem.Sampler.Sample(_executor!.Context.NativeHandle, updatedItem.Conversation.GetSampleIndex());
+                var token = item.Sampler.Sample(_executor!.Context.NativeHandle, item.Conversation.GetSampleIndex());
 
                 // Check for end of sequence
                 if (token.IsEndOfGeneration(_model!.Vocab))
                 {
-                    contextConsumed = EndConversation(inferenceItems, contextConsumed, i, updatedItem);
+                    contextConsumed = EndConversation(inferenceItems, contextConsumed, item);
                     continue;
                 }
 
-                updatedItem.Decoder.Add(token);
-                updatedItem.Conversation.Prompt(token);
-                var tokenText = updatedItem.Decoder.Read();
+                item.Decoder.Add(token);
+                item.Conversation.Prompt(token);
+                var tokenText = item.Decoder.Read();
 
                 //Certain models often get stuck repeating the exact same token, so temporarily ban any token that's been output twice in a row.
-                if (tokenText == updatedItem.LastTokenText)
-                    updatedItem.Sampler.BanToken(token, 3);
+                if (tokenText == item.LastTokenText)
+                    item.Sampler.BanToken(token, 3);
 
                 // Check for duplicate lines when we encounter a newline character
                 if (tokenText.Contains('\n'))
                 {
                     // Get the current text and find the last line
                     // Get the last line from the StringBuilder
-                    string lastLine = GetLastLine(updatedItem.ResponseBuilder);
+                    string lastLine = GetLastLine(item.ResponseBuilder);
 
                     bool isThinkingStart = lastLine.Contains("<think>");
                     bool isThinkingEnd = lastLine.Contains("</think>");
 
                     // Update thinking mode state
-                    bool wasInThinkingMode = updatedItem.IsInThinkingMode;
-                    bool isInThinkingMode = isThinkingStart || (wasInThinkingMode && !isThinkingEnd);
+                    bool wasInThinkingMode = item.IsInThinkingMode;
+                    item.IsInThinkingMode = isThinkingStart || (wasInThinkingMode && !isThinkingEnd);
 
                     // Initialize line history if needed
-                    if (updatedItem.LineHistory == null)
-                    {
-                        updatedItem = updatedItem with
-                        {
-                            LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase),
-                            IsInThinkingMode = isInThinkingMode
-                        };
-                    }
-                    else
-                    {
-                        updatedItem = updatedItem with { IsInThinkingMode = isInThinkingMode };
-                    }
+                    item.LineHistory ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
                     // Reset line history counts if we're exiting thinking mode
                     if (isThinkingEnd && wasInThinkingMode)
                     {
-                        updatedItem = updatedItem with
-                        {
-                            LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
-                        };
+                        item.LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     }
 
                     // Check if this line is a duplicate and not empty
                     if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2)
                     {
                         // Track the line and its count
-                        if (updatedItem.LineHistory.TryGetValue(lastLine, out int count))
+                        if (item.LineHistory.TryGetValue(lastLine, out int count))
                         {
                             // Line already exists, increment count
-                            updatedItem.LineHistory[lastLine] = count + 1;
+                            item.LineHistory[lastLine] = count + 1;
 
                             // Check if we've exceeded the allowed repetition limit
-                            int maxRepeats = updatedItem.IsInThinkingMode ? 3 : 0;
+                            int maxRepeats = item.IsInThinkingMode ? 3 : 0;
 
                             if (count >= maxRepeats)
                             {
                                 _logger.LogWarning("Conversation terminated due to repeating itself: {Line} (repeated {Count} times)", lastLine, count + 1);
 
                                 // This is a duplicate line - remove it from the StringBuilder
-                                RemoveLastLine(updatedItem.ResponseBuilder);
+                                RemoveLastLine(item.ResponseBuilder);
 
                                 // It's most likely stuck repeating itself, as smaller models especially tend to do, so just stop it here.
-                                contextConsumed = EndConversation(inferenceItems, contextConsumed, i, updatedItem);
+                                contextConsumed = EndConversation(inferenceItems, contextConsumed, item);
                                 continue;
                             }
                         }
                         else
                         {
                             // New line, add to dictionary with count 1
-                            updatedItem.LineHistory[lastLine] = 1;
+                            item.LineHistory[lastLine] = 1;
                         }
                     }
                 }
 
-                updatedItem.ResponseBuilder.Append(tokenText);
-                inferenceItems[i] = updatedItem with { LastTokenText = tokenText };
+                item.ResponseBuilder.Append(tokenText);
+                item.LastTokenText = tokenText;
 
                 //TODO: Consider banning # and * (or ** if that's its own token) for one or two tokens at the start of each line since I'm using my TokenBanner sampler, thereby preventing dumber models from outputting "**Q:**" or "### Here are your flash cards" or whatever.
             }
@@ -479,7 +481,7 @@ public class LlamaExecutor : IDisposable
         }
     }
 
-    private static int EndConversation(List<InferenceItem> inferenceItems, int contextConsumed, int disposeItemIndex, InferenceItem itemToDispose)
+    private static int EndConversation(List<InferenceItem> inferenceItems, int contextConsumed, InferenceItem itemToDispose)
     {
         // Free up some KV cache for the remaining conversations and wastes less time on inference for the dead conversation.
         //TODO: Can't find the source of the bug, not here and not in LlamaSharp, but it seems like the prompt tokens aren't being freed from the KV cache when we dispose the conversation. Might actually be a bug in llama.cpp, as it reports the KV cache being reduced, but then we run into NoKvSlot too soon.
@@ -493,12 +495,9 @@ public class LlamaExecutor : IDisposable
             contextConsumed -= itemToDispose.GroupExtraContextTokens;
 
         // Mark as completed
-        inferenceItems[disposeItemIndex] = itemToDispose with
-        {
-            IsCompleted = true,
-            LastTokenText = "",
-            GroupExtraContextTokens = 0
-        };
+        itemToDispose.IsCompleted = true;
+        itemToDispose.LastTokenText = "";
+        itemToDispose.GroupExtraContextTokens = 0;
         return contextConsumed;
     }
 
@@ -515,6 +514,7 @@ public class LlamaExecutor : IDisposable
             var originalIndex = inferenceItems[i].OriginalIndex;
             string prompt = prompts[originalIndex];
             string? extraContext = extraContexts[originalIndex];
+            string templatedPromptText;
 
             if (string.IsNullOrEmpty(extraContext))
             {
@@ -523,22 +523,18 @@ public class LlamaExecutor : IDisposable
                 template.Add("user", prompt);
                 template.AddAssistant = true;
 
-                var promptText = Encoding.UTF8.GetString(template.Apply());
-                var promptTokens = _executor!.Context.Tokenize(promptText);
-                inferenceItems[i] = inferenceItems[i] with { PromptTokens = promptTokens.Length };
-                contextConsumed += promptTokens.Length;
-                inferenceItems[i].Conversation.Prompt(promptTokens);
+                templatedPromptText = Encoding.UTF8.GetString(template.Apply());
             }
             else
             {
                 // Just add the prompt text and template suffix (no need for another template.Apply, as we did that when adding the extra context)
-                string completePrompt = prompt + (userMessageTemplateSuffix ?? "");
-                var promptTokens = _executor!.Context.Tokenize(completePrompt);
-
-                inferenceItems[i] = inferenceItems[i] with { PromptTokens = promptTokens.Length };
-                contextConsumed += promptTokens.Length;
-                inferenceItems[i].Conversation.Prompt(promptTokens);
+                templatedPromptText = prompt + (userMessageTemplateSuffix ?? "");
             }
+
+            var promptTokens = _executor!.Context.Tokenize(templatedPromptText);
+            inferenceItems[i].PromptTokens = promptTokens.Length;
+            contextConsumed += promptTokens.Length;
+            inferenceItems[i].Conversation.Prompt(promptTokens);
         }
 
         return contextConsumed;

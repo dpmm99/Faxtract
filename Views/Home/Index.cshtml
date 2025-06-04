@@ -7,7 +7,7 @@
     <div class="top-container">
         <form method="post" enctype="multipart/form-data" id="uploadForm">
             <div asp-validation-summary="All" class="text-danger"></div>
-            <input type="file" name="files" accept=".txt,.html,.htm" multiple />
+            <input type="file" name="files" accept=".txt,.html,.htm,.pdf" multiple />
             <div class="form-group mt-3">
                 <label for="extraContext">Extra Context (Optional)</label>
                 <textarea name="extraContext" id="extraContext" class="form-control" rows="3" placeholder="Add additional context for the LLM, e.g., 'These are about algorithms; no history questions.'"></textarea>
