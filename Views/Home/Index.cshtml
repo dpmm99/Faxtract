@@ -7,11 +7,17 @@
     <div class="top-container">
         <form method="post" enctype="multipart/form-data" id="uploadForm">
             <div asp-validation-summary="All" class="text-danger"></div>
-            <input type="file" name="files" accept=".txt" multiple />
+            <input type="file" name="files" accept=".txt,.html,.htm" multiple />
             <div class="form-group mt-3">
                 <label for="extraContext">Extra Context (Optional)</label>
                 <textarea name="extraContext" id="extraContext" class="form-control" rows="3" placeholder="Add additional context for the LLM"></textarea>
                 <small class="text-muted">This context will be provided to the AI to help generate more relevant flash cards.</small>
+            </div>
+            <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" id="stripHtml" name="stripHtml">
+                <label class="form-check-label" for="stripHtml">
+                    Strip HTML from input text
+                </label>
             </div>
             <button type="submit">Upload</button>
         </form>
@@ -27,6 +33,15 @@
 
     <div id="currentWork"></div>
     <br />
+
+    <!-- Flash Card Chart Section -->
+    <div class="chart-container mt-3">
+        <h3>Past Batches</h3>
+        <button id="loadChartBtn" onclick="loadFlashCardChart()">View Flash Card Density</button>
+        <div id="flashCardChart" class="flash-card-chart"></div>
+    </div>
+    <br />
+
     <button onclick="testFileUploadsWithDifferentContexts()">Test with built-in data</button>
 </div>
 

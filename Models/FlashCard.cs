@@ -2,9 +2,11 @@ namespace Faxtract.Models;
 
 public class FlashCard
 {
+    public int Id { get; set; }
     public string Question { get; set; } = string.Empty;
     public string Answer { get; set; } = string.Empty;
     public required TextChunk Origin { get; set; }
+    public int OriginId { get; set; }
 
     public static IEnumerable<FlashCard> ParseFromText(string text, TextChunk origin)
     {

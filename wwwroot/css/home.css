@@ -171,3 +171,149 @@ button {
     display: block;
     width: 100%;
 }
+
+/*Flash card chart styles*/
+
+.flash-card-chart {
+    margin-top: 20px;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+}
+
+.file-section {
+    margin-bottom: 20px;
+}
+
+.file-header {
+    font-size: 16px;
+    margin-bottom: 5px;
+}
+
+.chart-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+
+.chart-box {
+    width: 20px;
+    height: 20px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    background-color: #eee;
+    cursor: pointer;
+}
+
+.intensity-0 {
+    background-color: #eee;
+}
+
+.intensity-1 {
+    background-color: #d6e685;
+}
+
+.intensity-2 {
+    background-color: #8cc665;
+}
+
+.intensity-3 {
+    background-color: #44a340;
+}
+
+.intensity-4 {
+    background-color: #1e6823;
+}
+
+.intensity-5 {
+    background-color: #0e4213;
+}
+
+/*Chunk details styles*/
+
+#flashCardModal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    overflow-y: auto;
+}
+
+.modal-content {
+    background-color: white;
+    margin: 40px auto;
+    padding: 20px;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 900px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+    position: relative;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.modal-close {
+    font-size: 24px;
+    font-weight: bold;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    color: #555;
+}
+
+    .modal-close:hover {
+        color: #000;
+    }
+
+.chunk-info {
+    background-color: #f8f9fa;
+    padding: 15px;
+    margin-bottom: 20px;
+    border-radius: 6px;
+}
+    .chunk-info pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+.flash-cards-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+}
+
+.flash-card {
+    flex: 1 1 calc(50% - 20px);
+    min-width: 250px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 15px;
+    background-color: white;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+    .flash-card h4 {
+        margin-top: 0;
+        color: #4a6da7;
+    }
+
+@media (max-width: 768px) {
+    .flash-card {
+        flex: 1 1 100%;
+    }
+}
+
+summary {
+    cursor: pointer;
+}

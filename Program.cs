@@ -18,6 +18,7 @@ public class Program
         builder.Services.AddSingleton<IWorkProvider, MemoryWorkProvider>();
         builder.Services.AddSingleton<WorkProcessor>();
         builder.Services.AddSingleton<LlamaExecutor>();
+        builder.Services.AddSingleton<StorageService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkProcessor>());
 
         var app = builder.Build();

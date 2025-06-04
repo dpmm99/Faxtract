@@ -2,13 +2,12 @@ using Faxtract.Hubs;
 using Faxtract.Interfaces;
 using Faxtract.Models;
 using Microsoft.AspNetCore.SignalR;
-using System;
 using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace Faxtract.Services;
 
-public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubContext, LlamaExecutor executor, IConfiguration configuration, ILogger<WorkProcessor> logger) : BackgroundService
+public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubContext, LlamaExecutor executor, StorageService storageService, IConfiguration configuration, ILogger<WorkProcessor> logger) : BackgroundService
 {
     private readonly int _workBatchSize = configuration.GetSection("LLamaConfig").GetValue("WorkBatchSize", 4);
     private static int _processedCount;
@@ -72,6 +71,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
                     var flashCards = await ProcessBatchWithLLM(batch, stoppingToken);
 
                     SaveToJsonFile(flashCards); //Temporarily save to a file; later, we'll put it in a database
+                    await storageService.SaveAsync(flashCards);
 
                     // Update status for all items in batch
                     foreach (var (item, flashCard) in batch.Zip(flashCards))
