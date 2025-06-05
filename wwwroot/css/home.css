@@ -3,8 +3,12 @@
 }
 
 .top-container {
-    max-width: 25em;
+    max-width: 35em;
     margin: 0 auto;
+}
+
+form > h3 {
+    margin-top: 0;
 }
 
 summary {
@@ -75,7 +79,8 @@ summary {
 }
 
 .status {
-    margin: 20px 0;
+    margin: 20px auto;
+    max-width: 25em;
 }
 
 pre.response-content {

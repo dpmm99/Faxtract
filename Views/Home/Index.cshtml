@@ -6,6 +6,7 @@
 <div class="container">
     <div class="top-container">
         <form method="post" enctype="multipart/form-data" id="uploadForm">
+            <h3>Generate Flash Cards</h3>
             <div asp-validation-summary="All" class="text-danger"></div>
             <input type="file" name="files" accept=".txt,.html,.htm,.pdf" multiple />
             <div class="form-group mt-3">
@@ -22,17 +23,16 @@
             <button type="submit">Upload</button>
         </form>
         <div id="upload-status" class="mt-3"></div>
+    </div>
 
+    <details>
+        <summary><h3>Current work</h3></summary>
         <div class="status">
             <p>Processed: <span id="processed">0</span></p>
             <p>Remaining: <span id="remaining">0</span></p>
             <p>Tokens Generated: <span id="tokensGenerated">0</span></p>
             <p>Processing Speed: <span id="tokensPerSecond">-</span> tokens/sec</p>
         </div>
-    </div>
-
-    <details>
-        <summary><h3>Current work</h3></summary>
         <div id="currentWork">Idle</div>
     </details>
     <br />
