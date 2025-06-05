@@ -7,6 +7,13 @@
     margin: 0 auto;
 }
 
+summary {
+    text-align: center;
+}
+    summary > h3 {
+        display: inline-block;
+    }
+
 #currentWork {
     display: flex;
     flex-wrap: wrap;
@@ -105,7 +112,7 @@ input[type="file"] {
     width: calc(100% - 16px); /*Take off the padding*/
 }
 
-button {
+button, a.btn {
     background-color: #4a6da7;
     color: white;
     border: none;
@@ -114,9 +121,10 @@ button {
     cursor: pointer;
     font-weight: 500;
     transition: background-color 0.2s;
+    text-decoration: none;
 }
 
-    button:hover {
+    button:hover, a.btn:hover {
         background-color: #3a5a8a;
     }
 

@@ -398,6 +398,45 @@ public class StorageService(IConfiguration configuration)
         }
     }
 
+    public async Task<List<FlashCardCsvData>> GetAllFlashCardsForCsvAsync()
+    {
+        InitializeDatabase();
+
+        await using var connection = new SqliteConnection($"Data Source={DbPath}");
+        await connection.OpenAsync();
+
+        var result = new List<FlashCardCsvData>();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+        SELECT fc.Question, fc.Answer, tc.FileId
+        FROM FlashCards fc
+        INNER JOIN TextChunks tc ON fc.OriginId = tc.Id
+        ORDER BY tc.FileId, fc.Id
+        """;
+
+        await using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            result.Add(new FlashCardCsvData
+            {
+                Question = reader.GetString(0),
+                Answer = reader.GetString(1),
+                FileId = reader.GetString(2)
+            });
+        }
+
+        return result;
+    }
+
+    public class FlashCardCsvData
+    {
+        public string Question { get; set; } = string.Empty;
+        public string Answer { get; set; } = string.Empty;
+        public string FileId { get; set; } = string.Empty;
+    }
+
     public class FlashCardDetails
     {
         public TextChunk? Chunk { get; set; }

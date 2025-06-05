@@ -143,6 +143,31 @@ namespace Faxtract.Controllers
             });
         }
 
+        [HttpGet]
+        public async Task<IActionResult> DownloadFlashCardsAsCsv()
+        {
+            var flashCards = await storageService.GetAllFlashCardsForCsvAsync();
+
+            var csv = new System.Text.StringBuilder();
+            csv.AppendLine("Question,Answer,FileId");
+
+            foreach (var card in flashCards)
+            {
+                // Escape CSV fields properly
+                string question = $"\"{card.Question.Replace("\"", "\"\"")}\"";
+                string answer = $"\"{card.Answer.Replace("\"", "\"\"")}\"";
+                string fileId = $"\"{card.FileId.Replace("\"", "\"\"")}\"";
+
+                csv.AppendLine($"{question},{answer},{fileId}");
+            }
+
+            var bytes = System.Text.Encoding.UTF8.GetBytes(csv.ToString());
+            return new FileContentResult(bytes, "text/csv")
+            {
+                FileDownloadName = $"flashcards-{DateTime.Now:yyyy-MM-dd}.csv"
+            };
+        }
+
         /// <summary>
         /// Extracts text content from a PDF file via PdfPig
         /// </summary>
