@@ -1,11 +1,11 @@
 ﻿namespace Faxtract.Models;
 
-public class TextChunk(string content, int start, int end, string fileId, string? extraContext = null)
+public class TextChunk(string Content, int StartPosition, int EndPosition, string FileId, string? ExtraContext = null)
 {
     public int Id { get; set; }
-    public string Content { get; set; } = content;
-    public int StartPosition { get; set; } = start;
-    public int EndPosition { get; set; } = end;
-    public string FileId { get; set; } = fileId;
-    public string? ExtraContext { get; set; } = extraContext;
+    public string Content { get; set; } = Content;
+    public int StartPosition { get; set; } = StartPosition;
+    public int EndPosition { get; set; } = EndPosition;
+    public string FileId { get; set; } = FileId;
+    public string? ExtraContext { get; set; } = ExtraContext;
 }

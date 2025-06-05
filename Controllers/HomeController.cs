@@ -35,10 +35,36 @@ namespace Faxtract.Controllers
         }
 
         [HttpPost]
-        public async Task<IActionResult> DeleteAllFlashCards([FromQuery] int chunkId)
+        public async Task<IActionResult> DeleteChunk([FromQuery] int chunkId)
         {
             await storageService.DeleteChunkAsync(chunkId);
             return StatusCode(200);
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> RestoreChunk([FromBody] StorageService.FlashCardDetails flashCardDetails)
+        {
+            if (flashCardDetails?.Chunk == null)
+            {
+                return BadRequest(new { success = false, message = "No chunk data provided" });
+            }
+
+            try
+            {
+                var restoredDetails = await storageService.RestoreChunkAsync(flashCardDetails);
+                return Json(new
+                {
+                    success = true,
+                    chunkId = restoredDetails.Chunk?.Id,
+                    flashCardCount = restoredDetails.FlashCards.Count,
+                    flashCards = restoredDetails.FlashCards.ConvertAll(fc => fc.Id),
+                    message = $"Successfully restored chunk and {restoredDetails.FlashCards.Count} flash cards."
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = $"Error restoring chunk: {ex.Message}" });
+            }
         }
 
         [HttpPost]

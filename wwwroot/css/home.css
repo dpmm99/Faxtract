@@ -206,6 +206,10 @@ button {
     cursor: pointer;
 }
 
+.chart-box.deleted {
+    background-color: #faa;
+}
+
 .intensity-0 {
     background-color: #eee;
 }

@@ -139,11 +139,22 @@ function setsEqual(a, b) {
 
 connection.start();
 
+let chunks = new Map(); // Convert from array to Map for easier lookup
+
 function loadFlashCardChart() {
     fetch('Home/GetFlashCardChartData')
         .then(response => response.json())
         .then(data => {
-            renderFlashCardChart(data);
+            // Initialize Map with data from server
+            chunks.clear();
+            data.forEach(chunk => {
+                chunks.set(chunk.chunkId, {
+                    ...chunk,
+                    element: null, // Will store reference to DOM element
+                    isDeleted: false,
+                });
+            });
+            renderFlashCardChart();
         })
         .catch(error => {
             console.error('Error loading chart data:', error);
@@ -152,26 +163,32 @@ function loadFlashCardChart() {
         });
 }
 
-function renderFlashCardChart(chartData) {
+function renderFlashCardChart() {
     const chartContainer = document.getElementById('flashCardChart');
     chartContainer.innerHTML = ''; // Clear previous chart
 
-    if (chartData.length === 0) {
+    if (chunks.size === 0) {
         chartContainer.innerHTML = '<div class="alert alert-info">No flash card data available</div>';
         return;
     }
 
     // Group data by FileId for better organization
     const fileGroups = {};
-    chartData.forEach(item => {
-        if (!fileGroups[item.fileId]) {
-            fileGroups[item.fileId] = [];
+    for (const [_, chunk] of chunks) {
+        if (!fileGroups[chunk.fileId]) {
+            fileGroups[chunk.fileId] = [];
         }
-        fileGroups[item.fileId].push(item);
-    });
+        fileGroups[chunk.fileId].push(chunk);
+    }
 
-    // Find the maximum flash card count for color scaling
-    const maxCount = Math.max(...chartData.map(item => item.flashCardCount));
+    // Get non-zero flash card counts to calculate percentiles
+    const nonZeroCounts = Array.from(chunks.values())
+        .filter(chunk => !chunk.isDeleted) // Exclude deleted chunks
+        .map(chunk => chunk.flashCardCount)
+        .filter(count => count > 0);
+
+    // Calculate percentile thresholds for the 5 intensity buckets
+    const percentiles = calculatePercentiles(nonZeroCounts);
 
     // Create chart with file sections
     Object.keys(fileGroups).forEach(fileId => {
@@ -196,15 +213,25 @@ function renderFlashCardChart(chartData) {
             const box = document.createElement('div');
             box.className = 'chart-box';
 
+            if (chunk.isDeleted) {
+                box.classList.add('deleted');
+            }
+
             // Calculate color intensity based on flash card count (0-5 scale)
-            const intensity = maxCount > 0 ? Math.min(5, Math.ceil((chunk.flashCardCount / maxCount) * 5)) : 0;
+            const intensity = getIntensityLevel(chunk.flashCardCount, percentiles);
             box.classList.add(`intensity-${intensity}`);
+
+            // Store intensity level in chunk data for later use
+            chunk.currentIntensity = intensity; //TODON'T. Why?
 
             // Add tooltip with details
             box.title = `Chunk ID: ${chunk.chunkId}\nFlash Cards: ${chunk.flashCardCount}`;
 
             // Add click event to show the modal with flash card details
             box.addEventListener('click', () => showFlashCardDetails(chunk.chunkId));
+
+            // Store reference to DOM element
+            chunk.element = box;
 
             chartGrid.appendChild(box);
         });
@@ -214,11 +241,51 @@ function renderFlashCardChart(chartData) {
     });
 }
 
+// Calculate percentiles for an array of values
+function calculatePercentiles(values) {
+    if (values.length === 0) return [];
+
+    // Sort values in ascending order
+    const sortedValues = [...values].sort((a, b) => a - b);
+
+    // Calculate percentiles at 20%, 40%, 60%, 80% for 5 intensity levels
+    const percentiles = [];
+    for (let i = 1; i <= 4; i++) {
+        const index = Math.floor(sortedValues.length * (i * 0.2)) - 1;
+        percentiles.push(sortedValues[Math.max(0, index)]);
+    }
+
+    return percentiles;
+}
+
+// Determine intensity level based on percentiles
+function getIntensityLevel(value, percentiles) {
+    // Special case: Always use intensity-0 for zero values
+    if (value === 0) return 0;
+
+    // For non-zero values, determine which percentile bucket they fall into
+    for (let i = 0; i < percentiles.length; i++) {
+        if (value <= percentiles[i]) {
+            return i + 1; // Intensity 1-4
+        }
+    }
+
+    return 5; // Highest intensity bucket
+}
+
 function showFlashCardDetails(chunkId) {
     // Fetch flash card details from the server
     fetch(`Home/GetFlashCardDetails?chunkId=${chunkId}`)
         .then(response => response.json())
         .then(data => {
+            const chunk = chunks.get(chunkId);
+
+            // Update the chunk data with the latest from server
+            if (chunk && data.chunk) {
+                Object.assign(chunk, data.chunk);
+                chunk.flashCards = data.flashCards;
+            }
+
             // Create or get modal container
             let modal = document.getElementById('flashCardModal');
             if (!modal) {
@@ -234,9 +301,9 @@ function showFlashCardDetails(chunkId) {
                         <h3>Flash Card Details</h3>
                         <button class="modal-close" onclick="document.getElementById('flashCardModal').style.display = 'none'">&times;</button>
                     </div>
-                    ${renderChunkInfo(data.chunk)}
+                    ${renderChunkInfo(chunk)}
                     <div class="flash-cards-container">
-                        ${renderFlashCards(data.flashCards)}
+                        ${renderFlashCards(chunk.flashCards, chunk)}
                     </div>
                 </div>
             `;
@@ -263,11 +330,18 @@ function renderChunkInfo(chunk) {
         return '<div class="chunk-info">No chunk data available</div>';
     }
 
+    const storedChunk = chunks.get(parseInt(chunk.id));
+    const isDeleted = storedChunk && storedChunk.isDeleted;
+
     return `
         <div class="chunk-info">
             <div class="chunk-actions">
-                <button class="btn btn-danger btn-sm" onclick="deleteAllFlashCards(${chunk.id})">Delete Chunk</button>
-                <button class="btn btn-primary btn-sm" onclick="retryChunk(${chunk.id})">Retry Chunk</button>
+                ${!isDeleted ?
+                    `<button class="btn btn-danger btn-sm" onclick="deleteChunk(${chunk.id})">Delete Chunk</button>
+                     <button class="btn btn-primary btn-sm" onclick="retryChunk(${chunk.id})">Retry Chunk</button>` :
+                    `<button class="btn btn-success btn-sm" onclick="restoreChunk(${chunk.id})">Restore Chunk</button>
+                     <button class="btn btn-primary btn-sm" onclick="resubmitChunk(${chunk.id})">Resubmit Chunk</button>`
+                }
             </div>
             <h4>File: ${escapeHtml(chunk.fileId)}</h4>
             <p>Position: ${chunk.startPosition} - ${chunk.endPosition}</p>
@@ -286,10 +360,12 @@ function renderChunkInfo(chunk) {
 }
 
 // Helper function to render flash cards
-function renderFlashCards(flashCards) {
+function renderFlashCards(flashCards, chunk) {
     if (!flashCards || flashCards.length === 0) {
         return '<p>No flash cards available for this chunk.</p>';
     }
+
+    const isDeleted = chunk && chunk.isDeleted;
 
     return flashCards.map(card => `
         <div class="flash-card">
@@ -297,27 +373,50 @@ function renderFlashCards(flashCards) {
             <p>${escapeHtml(card.question)}</p>
             <h4>Answer:</h4>
             <p>${escapeHtml(card.answer)}</p>
-            <button class="btn btn-danger btn-sm" onclick="deleteFlashCard(${card.id})">Delete</button>
+            ${!isDeleted ?
+            `<button class="btn btn-danger btn-sm" onclick="deleteFlashCard(${card.id}, ${chunk.chunkId})">Delete</button>` :
+            ''}
         </div>
     `).join('');
 }
 
 // Delete a specific flash card
-function deleteFlashCard(flashCardId) {
+function deleteFlashCard(flashCardId, chunkId) {
     fetch(`Home/DeleteFlashCard?flashCardId=${flashCardId}`, {
         method: 'POST'
     })
         .then(response => {
             if (response.ok) {
-                // Get the current chunk ID from the modal content
-                const chunkInfoDiv = document.querySelector('.chunk-info');
-                const chunkId = chunkInfoDiv.querySelector('.chunk-actions button').onclick.toString().match(/deleteAllFlashCards\((\d+)\)/)[1];
+                // Get chunk from our stored Map
+                const chunk = chunks.get(chunkId);
+                if (chunk) {
+                    // Decrease flash card count
+                    chunk.flashCardCount--;
+
+                    // Recalculate intensity if needed
+                    if (chunk.element) {
+                        // Get all non-zero flash card counts for percentiles
+                        const nonZeroCounts = Array.from(chunks.values())
+                            .filter(c => !c.isDeleted && c.flashCardCount > 0)
+                            .map(c => c.flashCardCount);
+
+                        const percentiles = calculatePercentiles(nonZeroCounts);
+                        const newIntensity = getIntensityLevel(chunk.flashCardCount, percentiles);
+
+                        // Update intensity class if it changed
+                        if (newIntensity !== chunk.currentIntensity) {
+                            chunk.element.classList.remove(`intensity-${chunk.currentIntensity}`);
+                            chunk.element.classList.add(`intensity-${newIntensity}`);
+                            chunk.currentIntensity = newIntensity;
+                        }
+
+                        // Update tooltip
+                        chunk.element.title = `Chunk ID: ${chunk.chunkId}\nFlash Cards: ${chunk.flashCardCount}`;
+                    }
+                }
 
                 // Refresh the flash cards view
-                showFlashCardDetails(parseInt(chunkId));
-
-                // Also refresh the chart to update counts
-                loadFlashCardChart();
+                showFlashCardDetails(chunkId);
             } else {
                 alert('Failed to delete flash card. Please try again.');
             }
@@ -328,23 +427,33 @@ function deleteFlashCard(flashCardId) {
         });
 }
 
-// Delete all flash cards for a specific chunk
-function deleteAllFlashCards(chunkId) {
-    fetch(`Home/DeleteAllFlashCards?chunkId=${chunkId}`, {
+// Delete a chunk and all its flash cards
+function deleteChunk(chunkId) {
+    fetch(`Home/DeleteChunk?chunkId=${chunkId}`, {
         method: 'POST'
     })
         .then(response => {
             if (response.ok) {
-                // Close modal and refresh chart
+                // Mark chunk as deleted in our Map
+                const chunk = chunks.get(chunkId);
+                if (chunk) {
+                    chunk.isDeleted = true;
+
+                    // Mark the corresponding chart-box as deleted
+                    if (chunk.element) {
+                        chunk.element.classList.add('deleted');
+                    }
+                }
+
+                // Close modal
                 document.getElementById('flashCardModal').style.display = 'none';
-                loadFlashCardChart();
             } else {
-                alert('Failed to delete flash cards. Please try again.');
+                alert('Failed to delete chunk. Please try again.');
             }
         })
         .catch(error => {
-            console.error('Error deleting flash cards:', error);
-            alert('Failed to delete flash cards. Please try again.');
+            console.error('Error deleting chunk:', error);
+            alert('Failed to delete chunk. Please try again.');
         });
 }
 
@@ -365,5 +474,148 @@ function retryChunk(chunkId) {
         .catch(error => {
             console.error('Error retrying chunk:', error);
             alert('Failed to retry chunk. Please try again.');
+        });
+}
+
+// Restore a deleted chunk
+function restoreChunk(chunkId) {
+    // Get the chunk from our local chunks map
+    const chunk = chunks.get(chunkId);
+    if (!chunk) {
+        alert('Chunk data not found. Must be a bug!');
+        return;
+    }
+
+    // Recreate a FlashCardDetails object in the format the API expects
+    const flashCardDetails = {
+        chunk: {
+            id: chunk.id || chunk.chunkId,
+            content: chunk.content,
+            startPosition: chunk.startPosition,
+            endPosition: chunk.endPosition,
+            fileId: chunk.fileId,
+            extraContext: chunk.extraContext
+        },
+        flashCards: chunk.flashCards || []
+    };
+
+    // Send the data to the API
+    fetch('Home/RestoreChunk', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(flashCardDetails)
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Mark chunk as not deleted in our Map
+                chunk.isDeleted = false;
+
+                // Update the chunk with new ID from server
+                const newChunkId = data.chunkId;
+
+                // The record IDs will have changed, so we need to update our data structures
+                // Add the chunk with the new ID to our map
+                chunks.set(newChunkId, {
+                    ...chunk,
+                    chunkId: newChunkId,
+                    id: newChunkId
+                });
+                chunks.delete(chunkId);
+                chunkId = newChunkId;
+
+                // Update the flash cards with their new IDs
+                if (data.flashCards && chunk.flashCards) { //Hopefully unnecessary check
+                    data.flashCards.forEach((newCardId, index) => {
+                        if (index < chunk.flashCards.length) { //Hopefully unnecessary check
+                            chunk.flashCards[index].id = newCardId;
+                            chunk.flashCards[index].originId = newChunkId;
+                        }
+                    });
+                }
+
+                // Update the flash card count from server response
+                chunk.flashCardCount = data.flashCardCount;
+
+                // Update UI
+                if (chunk.element) {
+                    chunk.element.classList.remove('deleted');
+                    chunk.element.title = `Chunk ID: ${chunkId}\nFlash Cards: ${chunk.flashCardCount}`;
+
+                    // Remove old event listener (now using the wrong chunk ID)
+                    const oldElement = chunk.element;
+                    const newElement = oldElement.cloneNode(true);
+                    oldElement.parentNode.replaceChild(newElement, oldElement);
+
+                    // Add new event listener with updated chunkId
+                    newElement.addEventListener('click', () => showFlashCardDetails(chunkId));
+
+                    // Update the element reference in our chunk object
+                    chunk.element = newElement;
+                }
+
+                // Close modal and show it again with normal options (with updated chunkId)
+                document.getElementById('flashCardModal').style.display = 'none';
+                showFlashCardDetails(chunkId);
+            } else {
+                alert('Failed to restore chunk. Please try again.');
+            }
+        })
+        .catch(error => {
+            console.error('Error restoring chunk:', error);
+            alert('Failed to restore chunk. Please try again.');
+        });
+}
+
+// Resubmit a deleted chunk for processing
+function resubmitChunk(chunkId) {
+    // Get the chunk from our local chunks map
+    const chunk = chunks.get(chunkId);
+    if (!chunk) {
+        alert('Chunk data not found. Must be a bug!');
+        return;
+    }
+
+    // Create a FormData instance to match the format expected by UploadFile
+    const formData = new FormData();
+
+    // Create a text file from the chunk content with the original filename
+    const file = new File([chunk.content], chunk.fileId, { type: 'text/plain' });
+    formData.append('files', file);
+
+    // Add extra context if present
+    if (chunk.extraContext) {
+        formData.append('extraContext', chunk.extraContext);
+    }
+
+    // Set stripHtml to false by default
+    formData.append('stripHtml', false);
+
+    // Show upload status
+    const modal = document.getElementById('flashCardModal');
+    modal.style.display = 'none';
+
+    const uploadStatus = document.getElementById('upload-status');
+    uploadStatus.innerHTML = '<div class="alert alert-info">Re-uploading chunk...</div>';
+
+    // Use the same upload mechanism as the form
+    fetch('Home/UploadFile', {
+        method: 'POST',
+        body: formData
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                uploadStatus.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+                // No need to delete the chunk as it's already marked as deleted
+            } else {
+                uploadStatus.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+            }
+        })
+        .catch(error => {
+            console.error('Error resubmitting chunk:', error);
+            uploadStatus.innerHTML = `<div class="alert alert-danger">Upload failed: ${error.message}</div>`;
         });
 }

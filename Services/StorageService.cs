@@ -288,6 +288,7 @@ public class StorageService(IConfiguration configuration)
             await using var deleteChunkCommand = connection.CreateCommand();
             deleteChunkCommand.CommandText = "DELETE FROM TextChunks WHERE Id = @ChunkId";
             deleteChunkCommand.Parameters.AddWithValue("@ChunkId", chunkId);
+            await deleteChunkCommand.ExecuteNonQueryAsync();
 
             await transaction.CommitAsync();
         }
@@ -325,6 +326,76 @@ public class StorageService(IConfiguration configuration)
         }
 
         return null;
+    }
+
+    public async Task<FlashCardDetails> RestoreChunkAsync(FlashCardDetails flashCardDetails)
+    {
+        if (flashCardDetails.Chunk == null)
+        {
+            return flashCardDetails;
+        }
+
+        InitializeDatabase();
+
+        await using var connection = new SqliteConnection($"Data Source={DbPath}");
+        await connection.OpenAsync();
+
+        await using var transaction = connection.BeginTransaction();
+
+        try
+        {
+            // Insert the chunk first
+            var chunk = flashCardDetails.Chunk;
+
+            await using var chunkCommand = connection.CreateCommand();
+            chunkCommand.CommandText = """
+                INSERT INTO TextChunks (Content, StartPosition, EndPosition, FileId, ExtraContext)
+                VALUES (@Content, @StartPosition, @EndPosition, @FileId, @ExtraContext);
+                SELECT last_insert_rowid();
+                """;
+
+            chunkCommand.Parameters.AddWithValue("@Content", chunk.Content);
+            chunkCommand.Parameters.AddWithValue("@StartPosition", chunk.StartPosition);
+            chunkCommand.Parameters.AddWithValue("@EndPosition", chunk.EndPosition);
+            chunkCommand.Parameters.AddWithValue("@FileId", chunk.FileId);
+            chunkCommand.Parameters.AddWithValue("@ExtraContext", chunk.ExtraContext ?? (object)DBNull.Value);
+
+            // Set the generated ID back to the TextChunk
+            chunk.Id = Convert.ToInt32(await chunkCommand.ExecuteScalarAsync());
+
+            // Insert all flash cards associated with this chunk
+            foreach (var card in flashCardDetails.FlashCards)
+            {
+                await using var cardCommand = connection.CreateCommand();
+                cardCommand.CommandText = """
+                    INSERT INTO FlashCards (Question, Answer, OriginId)
+                    VALUES (@Question, @Answer, @OriginId);
+                    SELECT last_insert_rowid();
+                    """;
+
+                cardCommand.Parameters.AddWithValue("@Question", card.Question);
+                cardCommand.Parameters.AddWithValue("@Answer", card.Answer);
+                cardCommand.Parameters.AddWithValue("@OriginId", chunk.Id);
+
+                // Set the generated ID back to the FlashCard
+                card.Id = Convert.ToInt32(await cardCommand.ExecuteScalarAsync());
+                // Update the Origin reference
+                card.OriginId = chunk.Id;
+            }
+
+            await transaction.CommitAsync();
+
+            return new FlashCardDetails
+            {
+                Chunk = chunk,
+                FlashCards = flashCardDetails.FlashCards
+            };
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
     }
 
     public class FlashCardDetails
