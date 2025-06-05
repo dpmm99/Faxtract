@@ -29,6 +29,7 @@ public class LlamaExecutor : IDisposable
         DistributionSamplingPipelineThatStops Sampler,
         StreamingTokenDecoder Decoder,
         Conversation Conversation,
+        Queue<LLamaToken> RecentTokens,
         int OriginalIndex,
         string LastTokenText = "",
         int TokensGenerated = 0,
@@ -43,6 +44,7 @@ public class LlamaExecutor : IDisposable
         public DistributionSamplingPipelineThatStops Sampler { get; init; } = Sampler;
         public StreamingTokenDecoder Decoder { get; init; } = Decoder;
         public Conversation Conversation { get; init; } = Conversation;
+        public Queue<LLamaToken> RecentTokens { get; init; } = RecentTokens;
         public int OriginalIndex { get; init; } = OriginalIndex;
         public string LastTokenText { get; set; } = LastTokenText;
         public int TokensGenerated { get; set; } = TokensGenerated;
@@ -285,6 +287,7 @@ public class LlamaExecutor : IDisposable
                     Sampler: new DistributionSamplingPipelineThatStops(_model!, _config),
                     Decoder: new StreamingTokenDecoder(_executor!.Context),
                     Conversation: conversation,
+                    RecentTokens: new Queue<LLamaToken>(21),
                     OriginalIndex: index,
                     PromptTokens: 0,
                     GroupExtraContextTokens: string.IsNullOrEmpty(contextKey) ? 0 : contextConsumed,
@@ -355,6 +358,17 @@ public class LlamaExecutor : IDisposable
                 if (tokenText == item.LastTokenText)
                     item.Sampler.BanToken(token, 3);
 
+                //Try to break the Repetition Curse, but it might be better to just cancel this chunk if that happens
+                item.RecentTokens.Enqueue(token);
+                if (item.RecentTokens.Count >= 21)
+                {
+                    item.RecentTokens.Dequeue();
+                    if (item.RecentTokens.Distinct().Count() < 5)
+                    {
+                        foreach (var tokenToBan in item.RecentTokens.Distinct()) item.Sampler.BanToken(tokenToBan, 20);
+                    }
+                }
+
                 // Check for duplicate lines when we encounter a newline character
                 if (tokenText.Contains('\n'))
                 {
@@ -379,7 +393,7 @@ public class LlamaExecutor : IDisposable
                     }
 
                     // Check if this line is a duplicate and not empty
-                    if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2)
+                    if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2 && !lastLine.StartsWith("A:"))
                     {
                         // Track the line and its count
                         if (item.LineHistory.TryGetValue(lastLine, out int count))

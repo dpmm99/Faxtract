@@ -62,7 +62,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
                 }
 
                 foreach (var item in batch)
-                    _currentWork[item] = ("Queued", "");
+                    _currentWork[item] = ("Prompt prefilling", "");
                 await BroadcastStatus();
 
                 try
