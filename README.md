@@ -1,4 +1,4 @@
-# Faxtract# Faxtract
+# Faxtract
 
 Faxtract is an ASP.NET 8 MVC application designed for document extraction and processing (particularly flash cards, though you can give it whatever prompt you want) using LLamaSharp.
 
