@@ -208,6 +208,7 @@ button, a.btn {
     display: flex;
     flex-wrap: wrap;
     gap: 3px;
+    align-items: center;
 }
 
 .chart-box {
@@ -219,9 +220,12 @@ button, a.btn {
     cursor: pointer;
 }
 
-.chart-box.deleted {
-    background-color: #faa;
-}
+    .chart-box.deleted {
+        background-color: #faa;
+    }
+    .chart-box.last {
+        border: 3px solid #bcf;
+    }
 
 .intensity-0 {
     background-color: #eee;

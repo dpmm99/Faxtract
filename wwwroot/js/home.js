@@ -228,7 +228,12 @@ function renderFlashCardChart() {
             box.title = `Chunk ID: ${chunk.chunkId}\nFlash Cards: ${chunk.flashCardCount}`;
 
             // Add click event to show the modal with flash card details
-            box.addEventListener('click', () => showFlashCardDetails(chunk.chunkId));
+            box.addEventListener('click', (event) => {
+                // Highlight the last one you clicked so you can keep track if you're reviewing them in order to delete bad cards
+                document.querySelector(".chart-box.last")?.classList.remove("last");
+                event.target.classList.add("last");
+                showFlashCardDetails(chunk.chunkId);
+            });
 
             // Store reference to DOM element
             chunk.element = box;
