@@ -430,6 +430,25 @@ public class StorageService(IConfiguration configuration)
         return result;
     }
 
+    public async Task UpdateFlashCard(int id, string question, string answer)
+    {
+        await using var connection = new SqliteConnection($"Data Source={DbPath}");
+        await connection.OpenAsync();
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+        UPDATE FlashCards
+        SET Question = @Question, Answer = @Answer
+        WHERE Id = @Id
+        """;
+
+        command.Parameters.AddWithValue("@Question", question);
+        command.Parameters.AddWithValue("@Answer", answer);
+        command.Parameters.AddWithValue("@Id", id);
+
+        await command.ExecuteNonQueryAsync();
+    }
+
     public class FlashCardCsvData
     {
         public string Question { get; set; } = string.Empty;

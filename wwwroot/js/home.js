@@ -304,7 +304,7 @@ function showFlashCardDetails(chunkId) {
                 <div class="modal-content">
                     <div class="modal-header">
                         <h3>Flash Card Details</h3>
-                        <button class="modal-close" onclick="document.getElementById('flashCardModal').style.display = 'none'">&times;</button>
+                        <button class="modal-close" onclick="closeChunkModal()">&times;</button>
                     </div>
                     ${renderChunkInfo(chunk)}
                     <div class="flash-cards-container">
@@ -316,16 +316,264 @@ function showFlashCardDetails(chunkId) {
             // Show the modal
             modal.style.display = 'block';
 
+            // Set up editing functionality
+            setupFlashCardEditing();
+
             // Add event to close modal when clicking outside
             modal.addEventListener('click', function (event) {
                 if (event.target === modal) {
-                    modal.style.display = 'none';
+                    closeChunkModal();
                 }
             });
         })
         .catch(error => {
             console.error('Error loading flash card details:', error);
             alert('Failed to load flash card details. Please try again.');
+        });
+}
+
+function closeChunkModal() {
+    document.getElementById('flashCardModal').style.display = 'none';
+}
+
+function setupFlashCardEditing() {
+    const flashCardContents = document.querySelectorAll('.flash-card-content');
+
+    flashCardContents.forEach(element => {
+        // Store original content for cancel operation
+        const flashCardElement = element.closest('.flash-card');
+        const questionEl = flashCardElement.querySelector('.question');
+        const answerEl = flashCardElement.querySelector('.answer');
+        const flashCardId = parseInt(flashCardElement.querySelector('button')?.onclick.toString().match(/deleteFlashCard\((\d+)/)?.[1]);
+
+        // Skip if we can't find the flashcard ID
+        if (!flashCardId) return;
+
+        // Find the chunk that contains this flash card
+        for (const [chunkId, chunk] of chunks.entries()) {
+            if (!chunk.flashCards) continue;
+
+            const flashCard = chunk.flashCards.find(card => card.id === flashCardId);
+            if (flashCard) {
+                // Initialize editing state if not already present
+                if (!flashCard.editState) {
+                    flashCard.editState = {
+                        originalQuestion: flashCard.question,
+                        originalAnswer: flashCard.answer,
+                        isEditing: false,
+                        isModified: false
+                    };
+                }
+                break;
+            }
+        }
+
+        // Set up focus event - mark the element as being edited
+        element.addEventListener('focus', function () {
+            const cardId = parseInt(flashCardElement.querySelector('button')?.onclick.toString().match(/deleteFlashCard\((\d+)/)?.[1]);
+            if (!cardId) return;
+
+            // Find the flash card in chunks
+            let targetCard = null;
+            let parentChunk = null;
+
+            for (const [chunkId, chunk] of chunks.entries()) {
+                if (!chunk.flashCards) continue;
+
+                targetCard = chunk.flashCards.find(card => card.id === cardId);
+                if (targetCard) {
+                    parentChunk = chunk;
+                    break;
+                }
+            }
+
+            if (targetCard) {
+                targetCard.editState.isEditing = true;
+            }
+        });
+
+        // Set up input event to track modifications
+        element.addEventListener('input', function () {
+            const cardId = parseInt(flashCardElement.querySelector('button')?.onclick.toString().match(/deleteFlashCard\((\d+)/)?.[1]);
+            if (!cardId) return;
+
+            // Find the flash card in chunks
+            for (const [chunkId, chunk] of chunks.entries()) {
+                if (!chunk.flashCards) continue;
+
+                const targetCard = chunk.flashCards.find(card => card.id === cardId);
+                if (targetCard) {
+                    targetCard.editState.isModified = true;
+                    element.classList.add('modified');
+                    break;
+                }
+            }
+        });
+
+        // Set up blur event to highlight modified fields
+        element.addEventListener('blur', function () {
+            const cardId = parseInt(flashCardElement.querySelector('button')?.onclick.toString().match(/deleteFlashCard\((\d+)/)?.[1]);
+            if (!cardId) return;
+
+            // Find the flash card in chunks
+            for (const [chunkId, chunk] of chunks.entries()) {
+                if (!chunk.flashCards) continue;
+
+                const targetCard = chunk.flashCards.find(card => card.id === cardId);
+                if (targetCard && targetCard.editState) {
+                    // If it's modified but not explicitly saved or canceled
+                    if (targetCard.editState.isModified) {
+                        element.classList.add('modified');
+                    }
+
+                    targetCard.editState.isEditing = false;
+                    break;
+                }
+            }
+        });
+
+        // Handle keyboard events
+        element.addEventListener('keydown', function (event) {
+            const cardId = parseInt(flashCardElement.querySelector('button')?.onclick.toString().match(/deleteFlashCard\((\d+)/)?.[1]);
+            if (!cardId) return;
+
+            // Find the flash card and its parent chunk
+            let targetCard = null;
+
+            for (const [_, chunk] of chunks.entries()) {
+                if (!chunk.flashCards) continue;
+
+                targetCard = chunk.flashCards.find(card => card.id === cardId);
+                if (targetCard) {
+                    break;
+                }
+            }
+
+            if (!targetCard) return;
+
+            // Handle Escape key - cancel editing
+            if (event.key === 'Escape') {
+                event.preventDefault();
+
+                // Reset content to original
+                if (element.classList.contains('question')) {
+                    element.textContent = targetCard.editState.originalQuestion;
+                } else if (element.classList.contains('answer')) {
+                    element.textContent = targetCard.editState.originalAnswer;
+                }
+
+                // Reset edit state
+                element.classList.remove('modified');
+                targetCard.editState.isModified = false;
+                targetCard.editState.isEditing = false;
+
+                // Remove focus
+                element.blur();
+            }
+
+            // Handle Enter key (without Shift) - save changes
+            else if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+
+                // Get current question and answer values
+                const newQuestion = questionEl.textContent;
+                const newAnswer = answerEl.textContent;
+
+                // Update flash card on the server
+                updateFlashCardContent(cardId, newQuestion, newAnswer).then(success => {
+                    if (success) {
+                        // Update the flash card data
+                        targetCard.question = newQuestion;
+                        targetCard.answer = newAnswer;
+
+                        // Update edit state
+                        targetCard.editState.originalQuestion = newQuestion;
+                        targetCard.editState.originalAnswer = newAnswer;
+                        targetCard.editState.isModified = false;
+
+                        // Remove modified class
+                        questionEl.classList.remove('modified');
+                        answerEl.classList.remove('modified');
+                    }
+                });
+
+                // Remove focus
+                element.blur();
+            }
+
+            // Handle Shift+Enter - allow newline
+            else if (event.key === 'Enter' && event.shiftKey) {
+                // Default behavior (insert newline) is allowed
+            }
+        });
+    });
+}
+
+function cancelEditing(flashCardId) {
+    // Get all content-editable elements
+    const editableElements = document.querySelectorAll('.flash-card-content');
+
+    editableElements.forEach(element => {
+        const flashCardElement = element.closest('.flash-card');
+        if (!flashCardElement) return;
+
+        // Get the flash card ID from the delete button's onclick attribute
+        const cardIdMatch = flashCardElement.querySelector('button')?.onclick.toString().match(/deleteFlashCard\((\d+)/);
+        const cardId = cardIdMatch ? parseInt(cardIdMatch[1]) : null;
+
+        // If flashCardId is provided, only cancel editing for that specific card
+        if (flashCardId && cardId !== flashCardId) return;
+
+        // Find the flash card in chunks
+        for (const [_, chunk] of chunks.entries()) {
+            if (!chunk.flashCards) continue;
+
+            const targetCard = chunk.flashCards.find(card => card.id === cardId);
+            if (targetCard && targetCard.editState) {
+                // Reset content to original state
+                if (targetCard.editState.isModified) {
+                    if (element.classList.contains('question')) {
+                        element.textContent = targetCard.editState.originalQuestion;
+                    } else if (element.classList.contains('answer')) {
+                        element.textContent = targetCard.editState.originalAnswer;
+                    }
+                }
+
+                // Reset edit state
+                element.classList.remove('modified');
+                targetCard.editState.isModified = false;
+                targetCard.editState.isEditing = false;
+                break;
+            }
+        }
+    });
+}
+
+// Function to update flash card content on the server
+function updateFlashCardContent(flashCardId, question, answer) {
+    return fetch('Home/UpdateFlashCard', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            id: flashCardId,
+            question: question,
+            answer: answer
+        })
+    })
+        .then(response => {
+            if (response.ok) {
+                return true;
+            } else {
+                alert('Failed to update flash card. Please try again.');
+                return false;
+            }
+        })
+        .catch(error => {
+            console.error('Error updating flash card:', error);
+            alert('Failed to update flash card. Please try again.');
+            return false;
         });
 }
 
@@ -375,9 +623,9 @@ function renderFlashCards(flashCards, chunk) {
     return flashCards.map(card => `
         <div class="flash-card">
             <h4>Question:</h4>
-            <p>${escapeHtml(card.question)}</p>
+            <p class="flash-card-content question" contenteditable="true">${escapeHtml(card.question)}</p>
             <h4>Answer:</h4>
-            <p>${escapeHtml(card.answer)}</p>
+            <p class="flash-card-content answer" contenteditable="true">${escapeHtml(card.answer)}</p>
             ${!isDeleted ?
             `<button class="btn btn-danger btn-sm" onclick="deleteFlashCard(${card.id}, ${chunk.chunkId})">Delete</button>` :
             ''}
@@ -387,6 +635,7 @@ function renderFlashCards(flashCards, chunk) {
 
 // Delete a specific flash card
 function deleteFlashCard(flashCardId, chunkId) {
+    cancelEditing(flashCardId);
     fetch(`Home/DeleteFlashCard?flashCardId=${flashCardId}`, {
         method: 'POST'
     })
@@ -434,6 +683,7 @@ function deleteFlashCard(flashCardId, chunkId) {
 
 // Delete a chunk and all its flash cards
 function deleteChunk(chunkId) {
+    cancelEditing();
     fetch(`Home/DeleteChunk?chunkId=${chunkId}`, {
         method: 'POST'
     })
@@ -450,8 +700,7 @@ function deleteChunk(chunkId) {
                     }
                 }
 
-                // Close modal
-                document.getElementById('flashCardModal').style.display = 'none';
+                closeChunkModal();
             } else {
                 alert('Failed to delete chunk. Please try again.');
             }
@@ -469,8 +718,7 @@ function retryChunk(chunkId) {
     })
         .then(response => {
             if (response.ok) {
-                // Close modal and refresh chart
-                document.getElementById('flashCardModal').style.display = 'none';
+                closeChunkModal();
                 loadFlashCardChart();
             } else {
                 alert('Failed to retry chunk. Please try again.');
@@ -562,7 +810,7 @@ function restoreChunk(chunkId) {
                 }
 
                 // Close modal and show it again with normal options (with updated chunkId)
-                document.getElementById('flashCardModal').style.display = 'none';
+                closeChunkModal();
                 showFlashCardDetails(chunkId);
             } else {
                 alert('Failed to restore chunk. Please try again.');
@@ -599,8 +847,7 @@ function resubmitChunk(chunkId) {
     formData.append('stripHtml', false);
 
     // Show upload status
-    const modal = document.getElementById('flashCardModal');
-    modal.style.display = 'none';
+    closeChunkModal();
 
     const uploadStatus = document.getElementById('upload-status');
     uploadStatus.innerHTML = '<div class="alert alert-info">Re-uploading chunk...</div>';

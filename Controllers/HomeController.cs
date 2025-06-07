@@ -68,6 +68,13 @@ namespace Faxtract.Controllers
         }
 
         [HttpPost]
+        public async Task<IActionResult> UpdateFlashCard([FromBody] FlashCardUpdate flashCard)
+        {
+            await storageService.UpdateFlashCard(flashCard.Id, flashCard.Question, flashCard.Answer);
+            return StatusCode(200);
+        }
+
+        [HttpPost]
         public async Task<IActionResult> RetryChunk([FromQuery] int chunkId)
         {
             // Get the chunk data
