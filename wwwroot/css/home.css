@@ -118,6 +118,30 @@ input[type="file"] {
     width: calc(100% - 16px); /*Take off the padding*/
 }
 
+.input-selector {
+    margin-bottom: 15px;
+}
+
+    .input-selector label {
+        margin-right: 15px;
+        cursor: pointer;
+    }
+
+#textInputSection .form-group {
+    margin-bottom: 15px;
+}
+
+#directTextInput {
+    width: 100%;
+    font-family: monospace;
+    resize: vertical;
+}
+
+#customFilename {
+    width: 100%;
+    max-width: 400px;
+}
+
 button, a.btn {
     background-color: #4a6da7;
     color: white;

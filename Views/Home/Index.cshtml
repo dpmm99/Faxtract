@@ -8,7 +8,27 @@
         <form method="post" enctype="multipart/form-data" id="uploadForm">
             <h3>Generate Flash Cards</h3>
             <div asp-validation-summary="All" class="text-danger"></div>
-            <input type="file" name="files" accept=".txt,.html,.htm,.pdf" multiple />
+
+            <div class="input-selector">
+                <label><input type="radio" name="inputType" value="file" checked> Upload Files</label>
+                <label><input type="radio" name="inputType" value="text"> Enter Text</label>
+            </div>
+            <div id="fileInputSection">
+                <input type="file" name="files" accept=".txt,.html,.htm,.pdf" multiple />
+            </div>
+            <div id="textInputSection" style="display:none">
+                <div class="form-group">
+                    <label for="customFilename">Filename/identifier (optional)</label>
+                    <input type="text" id="customFilename" name="customFilename" class="form-control"
+                           placeholder="Leave blank to use current date and time">
+                </div>
+                <div class="form-group">
+                    <label for="directTextInput">Paste or type your text below:</label>
+                    <textarea id="directTextInput" name="directTextInput" class="form-control" rows="10"
+                              placeholder="Paste or type your content here..."></textarea>
+                </div>
+            </div>
+
             <div class="form-group mt-3">
                 <label for="extraContext">Extra Context (Optional)</label>
                 <textarea name="extraContext" id="extraContext" class="form-control" rows="3" placeholder="Add additional context for the LLM, e.g., 'These are about algorithms; no history questions.'"></textarea>

@@ -41,11 +41,29 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         MaxTokens = configuration.GetSection("LLamaConfig").GetValue("MaxTokens", 1024) * _workBatchSize;
+        var minimumWorkBatchSize = configuration.GetSection("LLamaConfig").GetValue("MinimumWorkBatchSize", 1);
+        var maxWaitTimeSeconds = configuration.GetSection("LLamaConfig").GetValue("MaxBatchWaitTimeSeconds", 30);
         try
         {
             var continuation = false;
+            DateTime? waitStartTime = null;
             while (!stoppingToken.IsCancellationRequested)
             {
+                //No mutex because you shouldn't have multiple WorkProcessors. Require a minimum number of chunks to process.
+                var remainingCount = workProvider.GetRemainingCount();
+                if (minimumWorkBatchSize > 1 && remainingCount > 0 && remainingCount < minimumWorkBatchSize)
+                {
+                    // Start tracking wait time if we haven't already
+                    waitStartTime ??= DateTime.UtcNow;
+                    if ((DateTime.UtcNow - waitStartTime.Value).TotalSeconds <= maxWaitTimeSeconds)
+                    {
+                        await Task.Delay(1000, stoppingToken);
+                        continuation = false;
+                        continue;
+                    }
+                }
+                waitStartTime = null; // Reset wait timer
+
                 var batch = workProvider.GetNextBatch(_workBatchSize);
                 if (batch.Count == 0)
                 {

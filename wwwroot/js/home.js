@@ -7,12 +7,36 @@
 document.getElementById('uploadForm').addEventListener('submit', function (e) {
     e.preventDefault();
 
+    const uploadStatus = document.getElementById('upload-status');
     const formData = new FormData(this);
     const stripHtml = document.getElementById('stripHtml').checked;
     formData.set('stripHtml', stripHtml);
 
-    const uploadStatus = document.getElementById('upload-status');
-    uploadStatus.innerHTML = '<div class="alert alert-info">Uploading files...</div>';
+    // Handle direct text input if that option is selected
+    const inputType = document.querySelector('input[name="inputType"]:checked').value;
+    if (inputType === 'text') {
+        const textInput = document.getElementById('directTextInput').value.trim();
+        if (!textInput) {
+            uploadStatus.innerHTML = '<div class="alert alert-danger">Please enter some text to process</div>';
+            return;
+        }
+
+        // Create a filename (use custom one or generate from date)
+        let filename = document.getElementById('customFilename').value.trim();
+        if (!filename) {
+            const now = new Date();
+            filename = `text_input_${now.toISOString().replace(/[:.]/g, '-')}.txt`;
+        }
+
+        // Create a file object from the text input
+        const file = new File([textInput], filename, { type: 'text/plain' });
+
+        // Replace any existing file input with our text-based file
+        formData.delete('files');
+        formData.append('files', file);
+    }
+
+    uploadStatus.innerHTML = '<div class="alert alert-info">Uploading content...</div>';
 
     fetch('Home/UploadFile', {
         method: 'POST',
@@ -22,7 +46,10 @@ document.getElementById('uploadForm').addEventListener('submit', function (e) {
         .then(data => {
             if (data.success) {
                 uploadStatus.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+                // Clear inputs
                 document.getElementById('uploadForm').elements.files.value = null;
+                document.getElementById('directTextInput').value = '';
+                document.getElementById('customFilename').value = '';
             } else {
                 uploadStatus.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
             }
@@ -30,6 +57,15 @@ document.getElementById('uploadForm').addEventListener('submit', function (e) {
         .catch(error => {
             uploadStatus.innerHTML = `<div class="alert alert-danger">Upload failed: ${error.message}</div>`;
         });
+});
+
+// Add input type toggle functionality
+document.querySelectorAll('input[name="inputType"]').forEach(radio => {
+    radio.addEventListener('change', function () {
+        const isFileInput = this.value === 'file';
+        document.getElementById('fileInputSection').style.display = isFileInput ? 'block' : 'none';
+        document.getElementById('textInputSection').style.display = isFileInput ? 'none' : 'block';
+    });
 });
 
 // Track complete responses for each chunk using position as identifier
