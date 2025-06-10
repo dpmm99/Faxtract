@@ -91,7 +91,7 @@ namespace Faxtract.Controllers
             await storageService.SaveAsync([chunk]);
             workProvider.AddWork([chunk]);
 
-            return StatusCode(200);
+            return Json(new { id = chunk.Id });
         }
 
         [HttpPost]

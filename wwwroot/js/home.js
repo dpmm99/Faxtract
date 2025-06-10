@@ -177,26 +177,26 @@ connection.start();
 
 let chunks = new Map(); // Convert from array to Map for easier lookup
 
-function loadFlashCardChart() {
-    fetch('Home/GetFlashCardChartData')
-        .then(response => response.json())
-        .then(data => {
-            // Initialize Map with data from server
-            chunks.clear();
-            data.forEach(chunk => {
-                chunks.set(chunk.chunkId, {
-                    ...chunk,
-                    element: null, // Will store reference to DOM element
-                    isDeleted: false,
-                });
+async function loadFlashCardChart() {
+    try {
+        const response = await fetch('Home/GetFlashCardChartData');
+        const data = await response.json();
+
+        // Initialize Map with data from server
+        chunks.clear();
+        data.forEach(chunk => {
+            chunks.set(chunk.chunkId, {
+                ...chunk,
+                element: null, // Will store reference to DOM element
+                isDeleted: false,
             });
-            renderFlashCardChart();
-        })
-        .catch(error => {
-            console.error('Error loading chart data:', error);
-            document.getElementById('flashCardChart').innerHTML =
-                `<div class="alert alert-danger">Failed to load chart data: ${error.message}</div>`;
         });
+        renderFlashCardChart();
+    } catch (error) {
+        console.error('Error loading chart data:', error);
+        document.getElementById('flashCardChart').innerHTML =
+            `<div class="alert alert-danger">Failed to load chart data: ${error.message}</div>`;
+    }
 }
 
 function renderFlashCardChart() {
@@ -748,22 +748,25 @@ function deleteChunk(chunkId) {
 }
 
 // Retry processing a specific chunk
-function retryChunk(chunkId) {
-    fetch(`Home/RetryChunk?chunkId=${chunkId}`, {
-        method: 'POST'
-    })
-        .then(response => {
-            if (response.ok) {
-                closeChunkModal();
-                loadFlashCardChart();
-            } else {
-                alert('Failed to retry chunk. Please try again.');
-            }
-        })
-        .catch(error => {
-            console.error('Error retrying chunk:', error);
-            alert('Failed to retry chunk. Please try again.');
+async function retryChunk(chunkId) {
+    try {
+        const response = await fetch(`Home/RetryChunk?chunkId=${chunkId}`, {
+            method: 'POST'
         });
+
+        if (response.ok) {
+            closeChunkModal();
+            await loadFlashCardChart();
+
+            const data = await response.json(); // Retrying assigns a new chunk ID.
+            chunks.get(data.id)?.element?.classList.add("last");
+        } else {
+            alert('Failed to retry chunk. Please try again.');
+        }
+    } catch (error) {
+        console.error('Error retrying chunk:', error);
+        alert('Failed to retry chunk. Please try again.');
+    }
 }
 
 // Restore a deleted chunk

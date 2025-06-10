@@ -19,7 +19,7 @@ Faxtract is an ASP.NET 8 MVC application designed for document extraction and pr
 
 ## Features
 
-- Document text extraction
+- Document text extraction from HTML, PDF (not the best since it doesn't use OCR), and plain text
 - Content chunking with configurable size and overlap
 - Batch inference for maximum throughput
 - Real-time processing updates via SignalR
@@ -104,9 +104,18 @@ You can adjust various parameters via the `LLamaConfig` section in `appsettings.
 
 - The number of file chunks to process in parallel is configurable via the `WorkBatchSize` setting in `appsettings.json`
 - Larger batch sizes increase throughput but require more GPU memory--larger batch sizes become harmful instead of beneficial soon after memory usage exceeds your total VRAM, if not sooner
-- KV cache could also be quantized to reduce memory usage, but this option is not currently implemented in the application (you can easily hard-code it, though!)
+- KV cache can also be quantized via the appsettings to reduce memory usage
 - Potential future work could involve starting on new chunks as old ones complete instead of waiting for the whole work batch, but it's complex and I didn't implement it because of the KV cache not freeing up as much as it should when conversation forks end.
 - A few techniques are used to prevent models from falling into repetition loops, like checking that there were at least 5 distinct tokens in the last 20 tokens and checking for exactly duplicate non-answer lines, with a higher allowance in \<think> blocks
+
+## Future work
+- The ideas mentioned above (use the tokenizer for more accurate length control of chunks, including document/chapter/page titles for context, eventually allow chunks to start processing without the whole batch having to finish first if the KV cache freeing bug gets fixed).
+- Could have a prompt in the chunk details modal to tell it to add missing topics or whatever.
+- Could have stored prompts alongside the "extra context" input for things like expanding on the given topics in greater depth, changing the reading level, or restricting generation to be based *only* on information in the given text (e.g., to reduce hallucinations if facts have changed since the model's training data was gathered).
+- Could allow retry, deletion, and download by input file in addition to deletion by chunk/flash card and downloading everything, maybe via a tree view of the files/chunks/flash cards with selection by node as an alternative to the histogram chart.
+- Could also have a semantic deduplication step after generation. Might be able to use an embedding model to quickly find *potentially* duplicate question pairs, and, if necessary, evaluate if those are really "too duplicate" via prompting the LLM.
+- Could show better stats with separate prefill performance, moving-average inference performance, and flash cards per second (although it can have much higher variance depending on the model).
+- Could even try generating flash cards for a portion of a bigger chunk (using more context for potentially higher accuracy) and then use whatever portion doesn't result in any flash cards together with the next chunk, but a single file's chunks couldn't be batched in that case, and you'd probably have to use an LLM to evaluate the flash cards' coverage.
 
 ## Trademark Disclaimers
 
