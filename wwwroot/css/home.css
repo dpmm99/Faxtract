@@ -375,3 +375,32 @@ button, a.btn {
         background-color: #fff8e8;
         border-left: 2px solid #f0ad4e;
     }
+
+/* Spinner for buttons */
+.spinner {
+    display: inline-block;
+    width: 1rem;
+    height: 1rem;
+    vertical-align: -0.125em;
+    border: 0.2em solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spinner-border .75s linear infinite;
+    margin-right: 0.5rem;
+}
+
+@keyframes spinner-border {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Adjust button content alignment when spinner is active */
+.btn .spinner {
+    position: relative;
+    top: 2px;
+}
+
+button:disabled, a.btn:disabled {
+    background-color: #bbb;
+}

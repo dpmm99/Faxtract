@@ -9,7 +9,7 @@
   <ItemGroup>
     <PackageReference Include="HtmlAgilityPack" Version="1.12.1" />
     <PackageReference Include="LLamaSharp" Version="0.24.0" />
-    <PackageReference Include="LLamaSharp.Backend.Cuda12.Windows" Version="0.24.0" />
+    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" Version="0.24.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.5" />
     <PackageReference Include="PdfPig" Version="0.1.10" />
   </ItemGroup>

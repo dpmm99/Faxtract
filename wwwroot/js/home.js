@@ -662,11 +662,73 @@ function renderFlashCards(flashCards, chunk) {
             <p class="flash-card-content question" contenteditable="true">${escapeHtml(card.question)}</p>
             <h4>Answer:</h4>
             <p class="flash-card-content answer" contenteditable="true">${escapeHtml(card.answer)}</p>
+            <button class="btn btn-info btn-sm" onclick="digDeeper(this, ${card.id}, ${chunk.chunkId})">Dig Deeper</button>
             ${!isDeleted ?
             `<button class="btn btn-danger btn-sm" onclick="deleteFlashCard(${card.id}, ${chunk.chunkId})">Delete</button>` :
             ''}
         </div>
     `).join('');
+}
+
+function digDeeper(buttonElement, flashCardId, chunkId) {
+    // Find the chunk and the flash card from our local data
+    const chunk = chunks.get(chunkId);
+    if (!chunk || !chunk.flashCards) {
+        alert('Chunk or flash card data not found. This is a bug.');
+        return;
+    }
+
+    const flashCard = chunk.flashCards.find(card => card.id === flashCardId);
+    if (!flashCard) {
+        alert('Flash card not found. This is a bug.');
+        return;
+    }
+
+    // Store original content, disable button, and show spinner
+    const originalButtonHtml = buttonElement.innerHTML;
+    buttonElement.disabled = true;
+    buttonElement.innerHTML = '<span class="spinner"></span> Digging...';
+
+    // Combine the question and answer to form the new content
+    const newContent = `${flashCard.question}\n${flashCard.answer}`;
+
+    // Combine original context with the new instruction
+    const digDeeperText = "Dig into the following topic a few layers deeper and explore it from a few different perspectives.";
+    const newExtraContext = chunk.extraContext
+        ? `${chunk.extraContext}\n${digDeeperText}`
+        : digDeeperText;
+
+    // Use the same mechanism as file upload to submit the new chunk
+    const formData = new FormData();
+    const file = new File([newContent], chunk.fileId + "-deeper", { type: 'text/plain' });
+    formData.append('files', file);
+    formData.append('extraContext', newExtraContext);
+    formData.append('stripHtml', false);
+
+    // Update status on the main page without closing the modal
+    const uploadStatus = document.getElementById('upload-status');
+    uploadStatus.innerHTML = '<div class="alert alert-info">Submitting for deeper analysis...</div>';
+
+    fetch('Home/UploadFile', {
+        method: 'POST',
+        body: formData
+    })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                uploadStatus.innerHTML = `<div class="alert alert-success">${data.message}</div>`;
+            } else {
+                uploadStatus.innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+            }
+        })
+        .catch(error => {
+            console.error('Error submitting for deeper analysis:', error);
+            uploadStatus.innerHTML = `<div class="alert alert-danger">Submission failed: ${error.message}</div>`;
+        })
+        .finally(() => {
+            // Restore button state, but keeping it disabled
+            buttonElement.innerHTML = originalButtonHtml;
+        });
 }
 
 // Delete a specific flash card
