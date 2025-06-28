@@ -70,7 +70,6 @@ document.querySelectorAll('input[name="inputType"]').forEach(radio => {
 
 // Track complete responses for each chunk using position as identifier
 let responseHistory = new Map();
-let activeChunkIds = new Set();
 
 // Map to track DOM elements for each work item
 const workItemElements = new Map();
@@ -84,6 +83,7 @@ connection.on("UpdateStatus", (processed, remaining, currentWork, tokensPerSecon
         tokensPerSecond ? tokensPerSecond.toFixed(1) : "-";
 
     const workDiv = document.getElementById("currentWork");
+    document.getElementById("idle")?.remove(); //No longer idle once it starts getting updates
 
     // Get current chunk identifiers
     const currentChunkIds = new Set();
@@ -93,14 +93,13 @@ connection.on("UpdateStatus", (processed, remaining, currentWork, tokensPerSecon
         }
     });
 
-    // Check if we have a new batch
-    const newBatchDetected = !setsEqual(activeChunkIds, currentChunkIds);
-    if (newBatchDetected) {
-        // Clear previous elements and history
-        workDiv.innerHTML = '';
-        workItemElements.clear();
-        responseHistory.clear();
-        activeChunkIds = currentChunkIds;
+    // Remove DOM nodes for work items that are no longer present
+    for (const [key, el] of workItemElements.entries()) {
+        if (!currentChunkIds.has(key)) {
+            el.remove();
+            workItemElements.delete(key);
+            responseHistory.delete(key);
+        }
     }
 
     // Process each work item

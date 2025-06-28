@@ -4,6 +4,7 @@ using Faxtract.Models;
 using Microsoft.AspNetCore.SignalR;
 using System.Collections.Concurrent;
 using System.Text.Json;
+using static Faxtract.Services.LlamaExecutor;
 
 namespace Faxtract.Services;
 
@@ -29,7 +30,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
         }
     }
 
-    public static IEnumerable<dynamic> CurrentWork => _currentWork
+    public static IEnumerable<dynamic> CurrentWork => _currentWork.Where(p => p.Value.Status != "Queued")
         .Select(kv => new
         {
             id = kv.Key,
@@ -43,92 +44,65 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
         MaxTokens = configuration.GetSection("LLamaConfig").GetValue("MaxTokens", 1024) * _workBatchSize;
         var minimumWorkBatchSize = configuration.GetSection("LLamaConfig").GetValue("MinimumWorkBatchSize", 1);
         var maxWaitTimeSeconds = configuration.GetSection("LLamaConfig").GetValue("MaxBatchWaitTimeSeconds", 30);
+
+        // Subscribe to global progress updates from the executor once.
+        executor.ProgressChanged += OnLlamaProgressChanged;
+
         try
         {
-            var continuation = false;
             DateTime? waitStartTime = null;
             while (!stoppingToken.IsCancellationRequested)
             {
-                //No mutex because you shouldn't have multiple WorkProcessors. Require a minimum number of chunks to process.
                 var remainingCount = workProvider.GetRemainingCount();
-                if (minimumWorkBatchSize > 1 && remainingCount > 0 && remainingCount < minimumWorkBatchSize)
+                var canProcess = _currentWork.Count < _workBatchSize * 2;
+
+                // Batching and throttling logic
+                if (!canProcess || (remainingCount > 0 && remainingCount < minimumWorkBatchSize))
                 {
-                    // Start tracking wait time if we haven't already
+                    if (!canProcess)
+                    {
+                        await Task.Delay(2000, stoppingToken); // Wait if we're throttled
+                        continue;
+                    }
+
                     waitStartTime ??= DateTime.UtcNow;
                     if ((DateTime.UtcNow - waitStartTime.Value).TotalSeconds <= maxWaitTimeSeconds)
                     {
                         await Task.Delay(1000, stoppingToken);
-                        continuation = false;
                         continue;
                     }
                 }
-                waitStartTime = null; // Reset wait timer
+                waitStartTime = null;
 
-                var batch = workProvider.GetNextBatch(_workBatchSize);
+                var batch = workProvider.GetNextBatch(_workBatchSize * 2 - _currentWork.Count);
                 if (batch.Count == 0)
                 {
                     await Task.Delay(1000, stoppingToken);
-                    continuation = false;
                     continue;
                 }
 
-                if (!continuation)
+                //Reset the performance information because nothing was processing--don't want to say 0.1 tokens per second if we did a few chunks at 1000/second, waited an hour, and started another chunk.
+                if (_currentWork.IsEmpty)
                 {
-                    _processingStartTime = DateTime.UtcNow;
+                    _processingStartTime = null;
                     _totalTokensProcessed = 0;
-                    continuation = true;
                 }
+                _processingStartTime ??= DateTime.UtcNow;
 
+                // Add items to the central tracking dictionary
                 foreach (var item in batch)
-                    _currentWork[item] = ("Prompt prefilling", "");
+                    _currentWork[item] = ("Queued", "");
+
                 await BroadcastStatus();
 
-                try
-                {
-                    // Process entire batch at once
-                    var flashCards = await ProcessBatchWithLLM(batch, stoppingToken);
-
-                    SaveToJsonFile(flashCards); //Temporarily save to a file; later, we'll put it in a database
-                    await storageService.SaveAsync(flashCards);
-
-                    // Update status for all items in batch
-                    foreach (var (item, flashCard) in batch.Zip(flashCards))
-                    {
-                        _currentWork[item] = (flashCard == null ? "Failed" : "Completed", _currentWork[item].Response);
-                        if (flashCard != null)
-                        {
-                            Interlocked.Increment(ref _processedCount);
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                    logger.LogInformation("Batch processing cancelled due to shutdown request");
-                    foreach (var item in batch)
-                        _currentWork[item] = ("Cancelled", _currentWork[item].Response);
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "Batch processing failed");
-                    foreach (var item in batch)
-                        _currentWork[item] = ("Failed", _currentWork[item].Response);
-                }
-
-                await BroadcastStatus();
-                foreach (var item in batch)
-                    _currentWork.TryRemove(item, out _);
+                DispatchBatchForProcessing(batch, stoppingToken);
             }
         }
         finally
         {
-            // Clear any remaining work items on shutdown
-            foreach (var key in _currentWork.Keys)
-            {
-                _currentWork[key] = ("Cancelled", _currentWork[key].Response);
-                _currentWork.TryRemove(key, out _);
-            }
-            await BroadcastStatus();
+            // Unsubscribe on shutdown
+            executor.ProgressChanged -= OnLlamaProgressChanged;
+            _currentWork.Clear();
         }
     }
 
@@ -143,49 +117,137 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
         return guid;
     }
 
-    private async Task<List<FlashCard>> ProcessBatchWithLLM(List<TextChunk> batch, CancellationToken ct)
+    /// <summary>
+    /// Handles global progress updates for ALL active work.
+    /// Updates both aggregate counters and individual item statuses.
+    /// </summary>
+    private void OnLlamaProgressChanged(BatchProgress progress)
     {
-        // Prepare prompts for each chunk
-        var prompts = batch.ConvertAll(chunk => chunk.Content);
+        // Update the global token counter
+        Interlocked.Add(ref _totalTokensProcessed, progress.NewTokens);
 
-        // Get extra contexts to pass to the executor
-        var extraContexts = batch.ConvertAll(chunk => chunk.ExtraContext);
-
-        // Subscribe to progress updates
-        var progressHandler = new Action<LlamaExecutor.BatchProgress>(progress =>
+        // Update individual item statuses with token information
+        foreach (var (id, tokenCount) in progress.TokensPerResponse)
         {
-            for (int i = 0; i < batch.Count; i++)
+            // Find the TextChunk corresponding to this id
+            var chunk = _currentWork.Keys.FirstOrDefault(c => c.Id == id);
+            if (chunk == null) continue;
+
+            // Calculate max tokens for this conversation:
+            // context size minus all OTHER conversations' tokens (total - this conversation's tokens)
+            var tokensUsedByOthers = progress.UsedTokens - tokenCount;
+            var maxTokensForThisConversation = progress.ContextMaxTokens - tokensUsedByOthers;
+
+            // Create status message based on completion status
+            var message = progress.CompletedMask.Contains(id)
+                ? "Processing complete"
+                : $"Processing ({tokenCount}/{maxTokensForThisConversation} tokens)";
+
+            // Update the status and response for this chunk
+            if (_currentWork.TryGetValue(chunk, out var currentValue))
             {
-                var chunkTokens = progress.TokensPerResponse[i];
-
-                // Calculate max tokens for this conversation:
-                // context size minus all OTHER conversations' tokens (total - this conversation's tokens)
-                var tokensUsedByOthers = progress.UsedTokens - chunkTokens;
-                var maxTokensForThisConversation = progress.ContextMaxTokens - tokensUsedByOthers;
-
-                var message = progress.CompletedMask[i]
-                    ? "Processing complete"
-                    : $"Processing ({chunkTokens}/{maxTokensForThisConversation} tokens)";
-
-                _currentWork[batch[i]] = (message, progress.CurrentResponses[i]);
+                _currentWork[chunk] = (message, progress.CurrentResponses.TryGetValue(id, out var response) ? response : currentValue.Response);
             }
-            Interlocked.Add(ref _totalTokensProcessed, progress.NewTokens);
-            _ = BroadcastStatus();
+        }
+
+        // Broadcast the updated status
+        _ = BroadcastStatus();
+    }
+
+    /// <summary>
+    /// Creates inference requests for a batch of text chunks, enqueues them with the LlamaExecutor,
+    /// and attaches a continuation to each request to handle its completion individually.
+    /// </summary>
+    private void DispatchBatchForProcessing(List<TextChunk> batch, CancellationToken ct)
+    {
+        // 1. Create an InferenceRequest for each chunk.
+        //    We need to keep the original chunk associated with its request.
+        var requestsWithSource = batch.ConvertAll(chunk =>
+        {
+            return (SourceChunk: chunk, Request: new InferenceRequest(
+                chunk.Id,
+                chunk.Content,
+                chunk.ExtraContext,
+                new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
+            ));
         });
 
-        executor.ProgressChanged += progressHandler;
+        // 2. Attach an individual completion handler to each request's task.
+        foreach (var (SourceChunk, Request) in requestsWithSource)
+        {
+            // Use ContinueWith to handle completion (success or failure) asynchronously
+            // for each individual item.
+            _ = Request.Tcs.Task.ContinueWith(
+                // The lambda becomes async so we can use await inside the handler
+                async completedTask => await HandleRequestCompletion(completedTask, SourceChunk),
+                ct, // Pass the cancellation token
+                TaskContinuationOptions.None,
+                TaskScheduler.Default
+            );
+        }
+
+        // 3. Enqueue all requests with the executor. This returns immediately.
+        executor.EnqueueRequests(requestsWithSource.Select(r => r.Request));
+    }
+
+    /// <summary>
+    /// This callback executes when a single dispatched request is finished.
+    /// It's responsible for updating the state for that specific item.
+    /// </summary>
+    private async Task HandleRequestCompletion(Task<string> task, TextChunk originalChunk)
+    {
         try
         {
-            var responses = await executor.GenerateResponses(prompts, extraContexts, 0, ct);
-            // Parse FlashCards only once at the end
-            return responses.Zip(batch)
-                .SelectMany(pair => FlashCard.ParseFromText(pair.First, pair.Second))
-                .Where(card => card != null)
-                .ToList()!;
+            if (task.IsFaulted)
+            {
+                logger.LogError(task.Exception, "A single request processing task failed for chunk {ChunkId}.", originalChunk.Id);
+                if (_currentWork.ContainsKey(originalChunk))
+                    _currentWork[originalChunk] = ("Failed: " + (task.Exception?.InnerException?.Message ?? "Unknown error"), "");
+            }
+            else if (task.IsCanceled)
+            {
+                logger.LogWarning("A single request processing task was canceled for chunk {ChunkId}.", originalChunk.Id);
+                if (_currentWork.ContainsKey(originalChunk))
+                    _currentWork[originalChunk] = ("Cancelled", "");
+            }
+            else // Task completed successfully
+            {
+                var llmResponse = await task; // Get the result string
+                var flashCards = FlashCard.ParseFromText(llmResponse, originalChunk).ToList();
+
+                if (flashCards.Count != 0)
+                {
+                    SaveToJsonFile(flashCards);
+                    await storageService.SaveAsync(flashCards);
+
+                    if (_currentWork.ContainsKey(originalChunk))
+                    {
+                        _currentWork[originalChunk] = ($"Completed: {flashCards.Count} cards created", "");
+                        Interlocked.Increment(ref _processedCount);
+                    }
+                }
+                else
+                {
+                    if (_currentWork.ContainsKey(originalChunk))
+                    {
+                        _currentWork[originalChunk] = ("Failed: No flashcards parsed from LLM response.", "");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "An unexpected error occurred in HandleRequestCompletion for chunk {ChunkId}.", originalChunk.Id);
+            if (_currentWork.ContainsKey(originalChunk))
+                _currentWork[originalChunk] = ("Failed", "Internal completion error");
         }
         finally
         {
-            executor.ProgressChanged -= progressHandler;
+            // Remove the finished item from the display/tracking dictionary after a slight delay.
+            await Task.Delay(5000);
+            _currentWork.TryRemove(originalChunk, out _);
+
+            await BroadcastStatus();
         }
     }
 

@@ -21,7 +21,7 @@ Faxtract is an ASP.NET 8 MVC application designed for document extraction and pr
 
 - Document text extraction from HTML, PDF (not the best since it doesn't use OCR), and plain text
 - Content chunking with configurable size and overlap
-- Batch inference for maximum throughput
+- Batch inference for maximum throughput with optional continuous batching (known issue with continuous batching: context may not clear as much as it was instructed to, so this can cause early inference termination with "no kv slot" errors)
 - Real-time processing updates via SignalR
 - Flash card generation from text content
 - Configurable LLM parameters via `appsettings.json`
@@ -99,6 +99,7 @@ You can adjust various parameters via the `LLamaConfig` section in `appsettings.
 - `WorkBatchSize`: Number of chunks to process simultaneously. Higher values increase throughput up to a certain point (typically 10-60 depending on GPU or CPU) as compute or registers become the bottleneck rather than memory bandwidth.
 - `MinimumWorkBatchSize`: Minimum number of chunks required before batch processing begins. This helps optimize energy usage by taking advantage of batched inference even if you upload small bits of text one by one.
 - `MaxBatchWaitTimeSeconds`: Maximum time to wait for the minimum batch size before processing anyway. This prevents indefinite waiting when there are few documents to process.
+- `AllowContinuousBatching`: If true, allows new chunks to start processing as soon as a previous one completes, rather than waiting for all chunks in a batch to finish. Improves throughput, but may cause catastrophic failure if that KV cache-freeing bug isn't fixed.
 
 ## Performance Considerations
 

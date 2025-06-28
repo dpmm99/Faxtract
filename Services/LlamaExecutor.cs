@@ -1,8 +1,10 @@
 ﻿using Faxtract.Interfaces;
+using Faxtract.Models;
 using LLama;
 using LLama.Batched;
 using LLama.Common;
 using LLama.Native;
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 
@@ -10,54 +12,105 @@ namespace Faxtract.Services;
 
 public class LlamaExecutor : IDisposable
 {
+    // Configuration and state fields
     private static LLamaWeights? _model;
     private static BatchedExecutor? _executor;
     private static readonly object _modelLock = new();
     private readonly ModelParams _parameters;
-    private readonly string _prePromptFile;
-    private readonly string _prePromptText;
     private readonly IConfigurationSection _config;
     private readonly ILogger<LlamaExecutor> _logger;
+
+    // Continuous batching toggle and settings
+    private readonly bool _allowContinuousBatching;
+    private readonly int _maxParallelConversations;
+
+    // Pre-prompt and context settings
+    private readonly string _prePromptFile;
+    private readonly string _prePromptText;
     private readonly string _extraContextPrefix;
     private readonly string _extraContextSuffix;
-    private int _prePromptTokenCount; // Track pre-prompt token count
+    private int _prePromptTokenCount;
 
-    // Event for progress reporting
+    // Continuous batching state
+    private readonly ConcurrentQueue<InferenceRequest> _pendingWork = new();
+    private readonly ConcurrentDictionary<int, InferenceItem> _activeItems = new();
+    private readonly ConcurrentDictionary<int, InferenceItem> _recentlyCompletedItems = new();
+    private readonly Dictionary<string, SharedContextGroup> _sharedContextGroups = [];
+    private readonly Task? _processingLoopTask;
+    private readonly CancellationTokenSource? _loopCts;
+    private int _currentContextTokens;
+
     public event Action<BatchProgress>? ProgressChanged;
 
-    private class InferenceItem(
-        StringBuilder ResponseBuilder,
-        DistributionSamplingPipelineThatStops Sampler,
-        StreamingTokenDecoder Decoder,
-        Conversation Conversation,
-        Queue<LLamaToken> RecentTokens,
-        int OriginalIndex,
-        string LastTokenText = "",
-        int TokensGenerated = 0,
-        int PromptTokens = 0,
-        int GroupExtraContextTokens = 0,
-        int GroupID = 0,
-        bool IsCompleted = false,
-        Dictionary<string, int>? LineHistory = null,
-        bool IsInThinkingMode = false)
+    #region Inner Classes for State Management
+    private class SharedContextGroup(Conversation conversation, int tokenCount)
     {
-        public StringBuilder ResponseBuilder { get; init; } = ResponseBuilder;
-        public DistributionSamplingPipelineThatStops Sampler { get; init; } = Sampler;
-        public StreamingTokenDecoder Decoder { get; init; } = Decoder;
-        public Conversation Conversation { get; init; } = Conversation;
-        public Queue<LLamaToken> RecentTokens { get; init; } = RecentTokens;
-        public int OriginalIndex { get; init; } = OriginalIndex;
-        public string LastTokenText { get; set; } = LastTokenText;
-        public int TokensGenerated { get; set; } = TokensGenerated;
-        public int PromptTokens { get; set; } = PromptTokens;
-        public int GroupExtraContextTokens { get; set; } = GroupExtraContextTokens;
-        public int GroupID { get; set; } = GroupID;
-        public bool IsCompleted { get; set; } = IsCompleted;
-        public Dictionary<string, int>? LineHistory { get; set; } = LineHistory;
-        public bool IsInThinkingMode { get; set; } = IsInThinkingMode;
+        public Conversation Conversation { get; set; } = conversation;
+        public int TokenCount { get; set; } = tokenCount;
+        public int ReferenceCount { get; set; } = 0;
+
+        /// <summary>
+        /// Indicates whether the initial prompt for this shared context has been
+        /// processed by an 'Infer' call.
+        /// </summary>
+        public bool IsProcessed { get; set; } // Always starts as not processed.
     }
 
-    public record BatchProgress(int ContextMaxTokens, int UsedTokens, int NewTokens, IReadOnlyList<string> CurrentResponses, bool[] CompletedMask, IReadOnlyList<int> TokensPerResponse);
+    private enum InferenceItemState
+    {
+        /// <summary>
+        /// A new shared context has been created for this item.
+        /// The shared context's prompt has been added to the batch, but not yet processed by an 'Infer' call.
+        /// The item's specific prompt has not been added yet.
+        /// </summary>
+        AwaitingSharedContextProcessing,
+
+        /// <summary>
+        /// The item's specific prompt has been added to the batch, but not yet processed by an 'Infer' call.
+        /// </summary>
+        AwaitingPromptProcessing,
+
+        /// <summary>
+        /// The item's prompt has been processed, and it's now actively generating tokens.
+        /// It is ready for sampling after each 'Infer' call.
+        /// </summary>
+        Generating
+    }
+
+    private class InferenceItem(InferenceRequest request, SharedContextGroup sharedContext, LLamaToken[] promptTokens, StreamingTokenDecoder decoder, DistributionSamplingPipelineThatStops sampler, InferenceItemState initialState)
+    {
+        // Existing properties
+        public StringBuilder ResponseBuilder { get; } = new();
+        public DistributionSamplingPipelineThatStops Sampler { get; } = sampler;
+        public StreamingTokenDecoder Decoder { get; } = decoder;
+        public Queue<LLamaToken> RecentTokens { get; } = new(21);
+        public string LastTokenText { get; set; } = "";
+        public int TokensGenerated { get; set; }
+        public SharedContextGroup SharedContext { get; } = sharedContext;
+        public InferenceRequest Request { get; } = request;
+        public bool IsInThinkingMode { get; set; } // Assuming this is for future use
+        public Dictionary<string, int>? LineHistory { get; set; }
+
+        /// <summary>
+        /// The current state of the inference item in the batching lifecycle.
+        /// </summary>
+        public InferenceItemState State { get; set; } = initialState;
+
+        /// <summary>
+        /// The conversation for this specific request. This is only assigned after the
+        /// shared context is processed and the conversation can be forked.
+        /// </summary>
+        public Conversation? Conversation { get; set; }
+
+        /// <summary>
+        /// The tokenized prompt for this specific request, held temporarily until the
+        /// shared context is processed and the conversation can be forked.
+        /// </summary>
+        public LLamaToken[] PromptTokens { get; } = promptTokens;
+    }
+    #endregion
+
+    public record BatchProgress(int ContextMaxTokens, int UsedTokens, int NewTokens, IReadOnlyDictionary<int, string> CurrentResponses, IReadOnlySet<int> CompletedMask, IReadOnlyDictionary<int, int> TokensPerResponse);
 
     public BatchedExecutor Executor => _executor ?? throw new InvalidOperationException("Executor not initialized");
 
@@ -66,7 +119,10 @@ public class LlamaExecutor : IDisposable
         _config = configuration.GetSection("LLamaConfig");
         _logger = logger;
 
-        _parameters = new ModelParams(_config["ModelPath"] ?? throw new Exception("No GGUF file specified. Set ModelPath in appsettings.json."))
+        _allowContinuousBatching = _config.GetValue("AllowContinuousBatching", false);
+        _maxParallelConversations = _config.GetValue("WorkBatchSize", 4);
+
+        _parameters = new ModelParams(_config["ModelPath"] ?? throw new Exception("No GGUF file specified."))
         {
             //Context: pre-prompt size (105 currently) plus a few tokens for the chat template plus WorkBatchSize times enough for one input chunk and response.
             ContextSize = _config.GetValue("ContextSize", 160 + _config.GetValue<uint>("MaxTokens", 1024) * (uint)_config.GetValue("WorkBatchSize", 4)),
@@ -90,8 +146,284 @@ public class LlamaExecutor : IDisposable
         _extraContextSuffix = _config["ExtraContextSuffix"] ?? ")\n";
 
         InitializeExecutor();
+
+        _logger.LogInformation("LlamaExecutor starting in Continuous Batching mode.");
+        _loopCts = new CancellationTokenSource();
+        _processingLoopTask = Task.Run(() => ProcessingLoop(_loopCts.Token));
     }
 
+    /// <summary>
+    /// Enqueues a collection of inference requests into the continuous batching queue.
+    /// This method returns immediately and does not wait for the requests to be processed.
+    /// The caller is responsible for tracking completion via the TaskCompletionSource on each request.
+    /// </summary>
+    public void EnqueueRequests(IEnumerable<InferenceRequest> requests)
+    {
+        foreach (var request in requests)
+        {
+            _pendingWork.Enqueue(request);
+        }
+    }
+
+    private async Task ProcessingLoop(CancellationToken stoppingToken)
+    {
+        _currentContextTokens = _prePromptTokenCount;
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (_allowContinuousBatching || _activeItems.IsEmpty)
+            {
+                // 1. Add new work if there's space
+                while (_activeItems.Count < _maxParallelConversations && _pendingWork.TryPeek(out var request))
+                {
+                    if (TryCreateInferenceItem(request) is not { } newItem)
+                    {
+                        // Not enough context space; stop trying to add more for now.
+                        break;
+                    }
+
+                    _pendingWork.TryDequeue(out _); //We used TryPeek to decide if we're *allowed* to do more work, so dequeue now. The alternative (dequeue and re-enqueue) would get the queue out of order, which is detrimental to performance when different requests have different extraContext.
+                    _activeItems[request.Id] = newItem;
+                    _logger.LogDebug("Added request {Id} to active batch with state {State}. Active count: {Count}", request.Id, newItem.State, _activeItems.Count);
+                }
+            }
+
+            if (_activeItems.IsEmpty)
+            {
+                await Task.Delay(100, stoppingToken);
+                continue;
+            }
+
+            // 2. Run one inference step for the entire active batch
+            // This processes all staged prompts (both shared ones that need forked afterward and specific conversations).
+            var result = await _executor!.Infer(stoppingToken);
+            if (result != DecodeResult.Ok)
+            {
+                _logger.LogError("Batch inference failed after {ContextConsumed} tokens with result: {Result}; dropping 1 conversation", _currentContextTokens, result);
+                // Simple recovery: find and remove a failing conversation. A real implementation might need more robust error handling.
+                var problematicItem = _activeItems.Values.FirstOrDefault(i => i.Conversation?.RequiresInference == true);
+                if (problematicItem != null) HandleCompletedItem(problematicItem, "Inference Failed");
+                continue;
+            }
+
+            // 3. Process results and transition states for each item in the batch
+            int newTokensInStep = ProcessInferenceStep();
+
+            // 4. Report progress
+            ReportProgress(newTokensInStep);
+            _currentContextTokens += newTokensInStep;
+
+            if (newTokensInStep == 0 && _activeItems.Values.All(i => i.Conversation?.RequiresInference == false))
+            {
+                // This can happen if all conversations finish in the same step.
+                // The completion handling inside ProcessInferenceStep already cleaned them up.
+                // We add a small delay to prevent a tight loop if no new work is coming in.
+                await Task.Delay(10, stoppingToken);
+            }
+        }
+    }
+
+    private int ProcessInferenceStep()
+    {
+        int newTokensInStep = 0;
+        // Use a list to iterate as we may modify the _activeItems dictionary
+        foreach (var item in _activeItems.Values.ToList())
+        {
+            switch (item.State)
+            {
+                case InferenceItemState.AwaitingSharedContextProcessing:
+                    // The shared context has now been processed by the 'Infer' call.
+                    // It's time to fork the conversation and add the specific prompt.
+                    item.SharedContext.IsProcessed = true;
+
+                    item.Conversation = item.SharedContext.Conversation.Fork();
+                    item.Conversation.Prompt(item.PromptTokens);
+                    _currentContextTokens += item.PromptTokens.Length;
+
+                    // This item now needs its specific prompt processed.
+                    item.State = InferenceItemState.AwaitingPromptProcessing;
+                    _logger.LogDebug("Request {Id} transitioned to AwaitingPromptProcessing.", item.Request.Id);
+                    break;
+
+                case InferenceItemState.AwaitingPromptProcessing:
+                    // The specific prompt has now been processed. Ready for generation.
+                    // The check 'RequiresInference' is now false for this item--Infer() isn't guaranteed to run ALL the inference (e.g., during prompt processing).
+                    if (item.Conversation!.RequiresInference) continue;
+                    item.State = InferenceItemState.Generating;
+                    _logger.LogDebug("Request {Id} transitioned to Generating. Sampling first token.", item.Request.Id);
+                    // Fall-through to immediately sample the first token
+                    goto case InferenceItemState.Generating;
+
+                case InferenceItemState.Generating:
+                    if (item.Conversation!.RequiresInference)
+                    {
+                        // We might still be prompt processing later active items if earlier ones were more than n_batch (llama.cpp's tokens-to-process-per-pass) / work batch count (this program's configuration).
+                        continue;
+                    }
+
+                    newTokensInStep++;
+                    var token = item.Sampler.Sample(_executor!.Context.NativeHandle, item.Conversation.GetSampleIndex());
+                    item.TokensGenerated++;
+
+                    if (token.IsEndOfGeneration(_model!.Vocab) || CheckForRepetition(item, token))
+                    {
+                        HandleCompletedItem(item);
+                        continue;
+                    }
+
+                    item.Decoder.Add(token);
+                    item.Conversation.Prompt(token); // This sets RequiresInference to true for the next loop
+                    var tokenText = item.Decoder.Read();
+
+                    //Certain models often get stuck repeating the exact same token, so temporarily ban any token that's been output twice in a row.
+                    if (tokenText == item.LastTokenText) item.Sampler.BanToken(token, 3);
+                    if (CheckForLineRepetition(item, tokenText))
+                    {
+                        HandleCompletedItem(item, "Terminated due to line repetition.");
+                        continue;
+                    }
+
+                    item.ResponseBuilder.Append(tokenText);
+                    item.LastTokenText = tokenText;
+                    break;
+            }
+        }
+        return newTokensInStep;
+    }
+
+    private void HandleCompletedItem(InferenceItem item, string? reason = null)
+    {
+        if (!_activeItems.TryRemove(item.Request.Id, out _)) return; // Already handled
+        _recentlyCompletedItems[item.Request.Id] = item; // For reporting progress one last time
+
+        var response = item.ResponseBuilder.ToString();
+        if (reason != null) // Early termination is NOT an exception; should still try to parse flash cards from the response.
+        {
+            _logger.LogWarning("Conversation {Id} completed prematurely. Reason: {Reason}", item.Request.Id, reason);
+        }
+        item.Request.Tcs.TrySetResult(response);
+
+        // Clean up resources and update token count
+        _currentContextTokens -= item.PromptTokens.Length + item.TokensGenerated;
+
+        // Free up some KV cache for the remaining conversations and wastes less time on inference for the dead conversation.
+        //TODO: Can't find the source of the bug, not here and not in LlamaSharp, but it seems like the prompt tokens aren't being freed from the KV cache when we dispose the conversation. Might actually be a bug in llama.cpp, as it reports the KV cache being reduced, but then we run into NoKvSlot too soon.
+        item.Conversation?.Dispose();
+
+        // Only remove the group extra tokens + dispose the fork for the LAST item sharing that context.
+        if (--item.SharedContext.ReferenceCount == 0 && item.SharedContext.TokenCount > 0)
+        {
+            _logger.LogDebug("Last reference to shared context '{Key}' released. Freeing {TokenCount} tokens.", item.SharedContext.Conversation.ToString(), item.SharedContext.TokenCount);
+            _currentContextTokens -= item.SharedContext.TokenCount;
+            item.SharedContext.Conversation.Dispose();
+            _sharedContextGroups.Remove(item.Request.ExtraContext ?? "");
+        }
+
+        _logger.LogDebug("Removed request {Id} from active batch. Active count: {Count}. Context used: {Tokens}", item.Request.Id, _activeItems.Count, _currentContextTokens);
+    }
+
+    private InferenceItem? TryCreateInferenceItem(InferenceRequest request)
+    {
+        var template = GetTemplate();
+        var promptTokens = template.Apply("user", request.Prompt, false, true);
+        var contextKey = request.ExtraContext ?? string.Empty;
+
+        if (!_sharedContextGroups.TryGetValue(contextKey, out var group))
+        {
+            // --- This is a new context group ---
+            LLamaToken[] extraContextTokens = [];
+            if (!string.IsNullOrEmpty(request.ExtraContext))
+            {
+                extraContextTokens = template.Apply("user", _extraContextPrefix + request.ExtraContext + _extraContextSuffix, true, false);
+            }
+
+            // Check if there's enough space for the shared context AND the new prompt.
+            if (_currentContextTokens + extraContextTokens.Length + promptTokens.Length + 1000 > _parameters.ContextSize)
+            {
+                _logger.LogInformation("Not enough context space for new group and prompt. Required: {Shared} + {Prompt}, Available: {Available}",
+                    extraContextTokens.Length, promptTokens.Length, (int)_parameters.ContextSize! - _currentContextTokens);
+                return null;
+            }
+
+            var baseConversation = CreateConversation();
+            if (extraContextTokens.Length > 0)
+            {
+                baseConversation.Prompt(extraContextTokens);
+            }
+
+            group = new SharedContextGroup(baseConversation, extraContextTokens.Length);
+            _sharedContextGroups[contextKey] = group;
+            _currentContextTokens += extraContextTokens.Length;
+
+            // Create the item in a state that indicates its shared context needs processing.
+            // We pass the promptTokens to be used *after* the shared context is processed.
+            var newItem = new InferenceItem(request, group, promptTokens,
+                new StreamingTokenDecoder(_executor!.Context),
+                new DistributionSamplingPipelineThatStops(_model!, _config),
+                InferenceItemState.AwaitingSharedContextProcessing);
+
+            group.ReferenceCount++;
+            return newItem;
+        }
+        else
+        {
+            // --- Group already exists ---
+            if (_currentContextTokens + promptTokens.Length + 1000 > _parameters.ContextSize)
+            {
+                _logger.LogInformation("Not enough context space for prompt in existing group. Required: {Prompt}, Available: {Available}",
+                    promptTokens.Length, (int)_parameters.ContextSize! - _currentContextTokens);
+                return null;
+            }
+
+            // The item can be created in a state that indicates its specific prompt needs processing.
+            var newItem = new InferenceItem(request, group, promptTokens,
+                new StreamingTokenDecoder(_executor!.Context),
+                new DistributionSamplingPipelineThatStops(_model!, _config),
+                // The state depends on whether the group itself has been processed yet.
+                group.IsProcessed ? InferenceItemState.AwaitingPromptProcessing : InferenceItemState.AwaitingSharedContextProcessing);
+
+            // If the group is already processed, we can fork and prompt immediately.
+            if (newItem.State == InferenceItemState.AwaitingPromptProcessing)
+            {
+                newItem.Conversation = group.Conversation.Fork();
+                newItem.Conversation.Prompt(promptTokens);
+                _currentContextTokens += promptTokens.Length;
+            }
+
+            group.ReferenceCount++;
+            return newItem;
+        }
+    }
+
+    private void ReportProgress(int newTokens)
+    {
+        if (ProgressChanged == null) return;
+
+        // Combine active and recently completed items for reporting
+        var allItems = _activeItems.Concat(_recentlyCompletedItems).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        var completed = _recentlyCompletedItems.Keys.ToHashSet();
+        var responses = allItems.ToDictionary(kv => kv.Key, kv => kv.Value.LastTokenText);
+        var tokensPer = allItems.ToDictionary(kv => kv.Key, kv => kv.Value.TokensGenerated);
+
+        ProgressChanged.Invoke(new BatchProgress(
+            (int)_parameters.ContextSize!,
+            _currentContextTokens,
+            newTokens,
+            responses,
+            completed,
+            tokensPer
+        ));
+
+        // Clear the recently completed items after reporting
+        foreach (var item in _recentlyCompletedItems)
+        {
+            item.Value.LastTokenText = "";
+        }
+        _recentlyCompletedItems.Clear();
+    }
+
+    #region Utility and Helper Methods
     [MemberNotNull(nameof(_executor))]
     [MemberNotNull(nameof(_model))]
     private void InitializeExecutor()
@@ -115,7 +447,7 @@ public class LlamaExecutor : IDisposable
 
     private static IChatTemplate GetTemplate() => IsMistral32Small()
         ? new MistralSmall32Template(_model!, (text, isSpecial) => _executor!.Context.Tokenize(text, false, isSpecial))
-        : new   LlamaTemplateWrapper(_model!, (text, isSpecial) => _executor!.Context.Tokenize(text, false, isSpecial));
+        : new LlamaTemplateWrapper(_model!, (text, isSpecial) => _executor!.Context.Tokenize(text, false, isSpecial));
 
     private void InitializeState()
     {
@@ -160,284 +492,80 @@ public class LlamaExecutor : IDisposable
         }
     }
 
-    public Conversation CreateConversation()
+    public Conversation CreateConversation() => _executor!.Load(_prePromptFile);
+
+    private static bool CheckForRepetition(InferenceItem item, LLamaToken token)
     {
-        return _executor!.Load(_prePromptFile);
+        //Try to break the Repetition Curse, but it might be better to just cancel this chunk if that happens
+        item.RecentTokens.Enqueue(token);
+        if (item.RecentTokens.Count > 20)
+        {
+            item.RecentTokens.Dequeue();
+            if (item.RecentTokens.Distinct().Count() < 5)
+            {
+                foreach (var tokenToBan in item.RecentTokens.Distinct()) item.Sampler.BanToken(tokenToBan, 20);
+                return true; // Terminate
+            }
+        }
+        return false;
     }
-
-    public async Task<List<string>> GenerateResponses(List<string> prompts, List<string?> extraContexts, int contextMaxTokens = 0, CancellationToken cancellationToken = default)
+    private bool CheckForLineRepetition(InferenceItem item, string tokenText)
     {
-        if (contextMaxTokens <= 0)
-            contextMaxTokens = (int)_parameters.ContextSize!;
-
-        // Create decoders for each conversation
-        var inferenceItems = new List<InferenceItem>();
-
-        try
+        // Check for duplicate lines when we encounter a newline character
+        if (tokenText.Contains('\n'))
         {
-            // Group prompts by extra context to optimize forking
-            var groupedPrompts = GroupPromptsByContext(prompts, extraContexts);
+            // Get the current text and find the last line
+            // Get the last line from the StringBuilder
+            string lastLine = GetLastLine(item.ResponseBuilder);
 
-            // Process each context group and prepare conversations
-            await ProcessContextGroups(inferenceItems, groupedPrompts, cancellationToken);
+            bool isThinkingStart = lastLine.Contains("<think>");
+            bool isThinkingEnd = lastLine.Contains("</think>");
 
-            // Sort items by their original index to ensure they're processed in the correct order (not super important, but makes the UI more predictable)
-            inferenceItems.Sort((a, b) => a.OriginalIndex.CompareTo(b.OriginalIndex));
+            // Update thinking mode state
+            bool wasInThinkingMode = item.IsInThinkingMode;
+            item.IsInThinkingMode = isThinkingStart || (wasInThinkingMode && !isThinkingEnd);
 
-            // Submit all prompts
-            int contextConsumed = PromptConversations(prompts, extraContexts, inferenceItems);
+            // Initialize line history if needed
+            item.LineHistory ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-            // Main inference loop
-            contextConsumed = await RunBatchInference(contextMaxTokens, inferenceItems, contextConsumed, cancellationToken);
-
-            // Update once more so the UI doesn't repeat the last token
-            ProgressChanged?.Invoke(new BatchProgress(
-                    contextMaxTokens,
-                    contextConsumed,
-                    0,
-                    new string[prompts.Count],
-                    [.. inferenceItems.Select(item => item.IsCompleted)],
-                    [.. inferenceItems.Select(item => item.TokensGenerated)]
-                ));
-
-            // Collect final responses in original order
-            return [.. inferenceItems
-                .OrderBy(item => item.OriginalIndex)
-                .Select(item => item.ResponseBuilder.ToString())];
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error during LlamaExecutor processing: {Message}", ex.Message);
-            throw;
-        }
-        finally
-        {
-            // Cleanup conversations
-            foreach (var item in inferenceItems)
+            // Reset line history counts if we're exiting thinking mode
+            if (isThinkingEnd && wasInThinkingMode)
             {
-                if (!item.Conversation.IsDisposed)
-                    item.Conversation.Dispose();
-            }
-        }
-    }
-
-    private async Task ProcessContextGroups(
-        List<InferenceItem> inferenceItems,
-        Dictionary<string, List<(int Index, string Prompt)>> groupedPrompts,
-        CancellationToken cancellationToken)
-    {
-        // Initialize base conversation from the saved state
-        var baseConversation = CreateConversation();
-
-        // Dictionaries to track forked conversations with their extra-context key and how many tokens they consume
-        var groups = new Dictionary<int, (Conversation Conversation, int ContextTokens)>();
-
-        var groupIndex = 0;
-        foreach (var group in groupedPrompts)
-        {
-            string contextKey = group.Key;
-            Conversation sourceConversation;
-            int contextConsumed = 0;
-
-            if (string.IsNullOrEmpty(contextKey))
-            {
-                // Use the base conversation directly for empty context
-                sourceConversation = baseConversation;
-            }
-            else if (groups.TryGetValue(groupIndex, out var existingConversation))
-            {
-                // Reuse existing conversation with same extra context
-                sourceConversation = existingConversation.Conversation;
-                contextConsumed = existingConversation.ContextTokens;
-            }
-            else
-            {
-                // Create a new conversation with this extra context by forking from the base
-                var conversation = baseConversation.Fork();
-
-                var template = GetTemplate();
-
-                // Get the user message tokens with template formatting, leaving off the closing tokens since there's more text to come.
-                var extraContextTokens = template.Apply("user", _extraContextPrefix + contextKey + _extraContextSuffix, true, false);
-
-                conversation.Prompt(extraContextTokens);
-
-                // Store the conversation for reuse
-                groups[groupIndex] = (conversation, extraContextTokens.Length);
-                sourceConversation = conversation;
-                contextConsumed = extraContextTokens.Length;
+                item.LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             }
 
-            // Process all prompts in this context group
-            foreach (var (index, _) in group.Value)
+            // Check if this line is a duplicate and not empty
+            if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2 && !lastLine.StartsWith("A:"))
             {
-                // For the first prompt in each group, use the source conversation
-                // For subsequent prompts, fork from the source
-                var conversation = group.Value.Count > 1 && index != group.Value[0].Index
-                    ? sourceConversation.Fork()
-                    : sourceConversation;
-
-                // Create and add a new InferenceItem with all required components
-                inferenceItems.Add(new InferenceItem(
-                    ResponseBuilder: new StringBuilder(),
-                    Sampler: new DistributionSamplingPipelineThatStops(_model!, _config),
-                    Decoder: new StreamingTokenDecoder(_executor!.Context),
-                    Conversation: conversation,
-                    RecentTokens: new Queue<LLamaToken>(21),
-                    OriginalIndex: index,
-                    PromptTokens: 0,
-                    GroupExtraContextTokens: string.IsNullOrEmpty(contextKey) ? 0 : contextConsumed,
-                    GroupID: groupIndex
-                ));
-            }
-
-            groupIndex++;
-        }
-
-        // Must run inference if we called Prompt on any conversation since they'll ALL be prompted again
-        while (groups.Any(p => p.Value.Conversation.RequiresInference))
-            await _executor!.Infer(cancellationToken);
-    }
-
-    private async Task<int> RunBatchInference(
-        int contextMaxTokens,
-        List<InferenceItem> inferenceItems,
-        int contextConsumed,
-        CancellationToken cancellationToken)
-    {
-        // Main inference loop
-        var newTokens = 1;
-        while (contextConsumed < contextMaxTokens && inferenceItems.Any(item => !item.IsCompleted) && newTokens > 0)
-        {
-            var result = await _executor!.Infer(cancellationToken);
-            if (result != DecodeResult.Ok)
-            {
-                _logger.LogError("Batch inference failed after {ContextConsumed} tokens with result: {Result}; dropping 1 conversation", contextConsumed, result);
-
-                // Find the last active conversation to dispose
-                var disposeItemIndex = inferenceItems.FindLastIndex(item => !item.Conversation.IsDisposed && !item.IsCompleted);
-                if (disposeItemIndex >= 0)
+                // Track the line and its count
+                if (item.LineHistory.TryGetValue(lastLine, out int count))
                 {
-                    contextConsumed = EndConversation(inferenceItems, contextConsumed, inferenceItems[disposeItemIndex]);
-                }
+                    // Line already exists, increment count
+                    item.LineHistory[lastLine] = count + 1;
 
-                continue;
-            }
+                    // Check if we've exceeded the allowed repetition limit
+                    int maxRepeats = item.IsInThinkingMode ? 3 : 0;
 
-            // Sample and decode tokens for each active conversation
-            newTokens = 0;
-            for (var i = 0; i < inferenceItems.Count; i++)
-            {
-                var item = inferenceItems[i];
-                item.LastTokenText = "";
-                if (item.IsCompleted || item.Conversation.RequiresInference) continue;
-
-                newTokens++;
-                item.TokensGenerated++;
-
-                var token = item.Sampler.Sample(_executor!.Context.NativeHandle, item.Conversation.GetSampleIndex());
-
-                // Check for end of sequence
-                if (token.IsEndOfGeneration(_model!.Vocab))
-                {
-                    contextConsumed = EndConversation(inferenceItems, contextConsumed, item);
-                    continue;
-                }
-
-                item.Decoder.Add(token);
-                item.Conversation.Prompt(token);
-                var tokenText = item.Decoder.Read();
-
-                //Certain models often get stuck repeating the exact same token, so temporarily ban any token that's been output twice in a row.
-                if (tokenText == item.LastTokenText)
-                    item.Sampler.BanToken(token, 3);
-
-                //Try to break the Repetition Curse, but it might be better to just cancel this chunk if that happens
-                item.RecentTokens.Enqueue(token);
-                if (item.RecentTokens.Count >= 21)
-                {
-                    item.RecentTokens.Dequeue();
-                    if (item.RecentTokens.Distinct().Count() < 5)
+                    if (count >= maxRepeats)
                     {
-                        foreach (var tokenToBan in item.RecentTokens.Distinct()) item.Sampler.BanToken(tokenToBan, 20);
+                        _logger.LogWarning("Conversation terminated due to repeating itself: {Line} (repeated {Count} times)", lastLine, count + 1);
+
+                        // This is a duplicate line - remove it from the StringBuilder
+                        RemoveLastLine(item.ResponseBuilder);
+
+                        // It's most likely stuck repeating itself, as smaller models especially tend to do, so just stop it here.
+                        HandleCompletedItem(item, "Non-answer line repetition");
+                        return true; // Terminate
                     }
                 }
-
-                // Check for duplicate lines when we encounter a newline character
-                if (tokenText.Contains('\n'))
+                else
                 {
-                    // Get the current text and find the last line
-                    // Get the last line from the StringBuilder
-                    string lastLine = GetLastLine(item.ResponseBuilder);
-
-                    bool isThinkingStart = lastLine.Contains("<think>");
-                    bool isThinkingEnd = lastLine.Contains("</think>");
-
-                    // Update thinking mode state
-                    bool wasInThinkingMode = item.IsInThinkingMode;
-                    item.IsInThinkingMode = isThinkingStart || (wasInThinkingMode && !isThinkingEnd);
-
-                    // Initialize line history if needed
-                    item.LineHistory ??= new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-                    // Reset line history counts if we're exiting thinking mode
-                    if (isThinkingEnd && wasInThinkingMode)
-                    {
-                        item.LineHistory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                    }
-
-                    // Check if this line is a duplicate and not empty
-                    if (!string.IsNullOrWhiteSpace(lastLine) && lastLine.Length > 2 && !lastLine.StartsWith("A:"))
-                    {
-                        // Track the line and its count
-                        if (item.LineHistory.TryGetValue(lastLine, out int count))
-                        {
-                            // Line already exists, increment count
-                            item.LineHistory[lastLine] = count + 1;
-
-                            // Check if we've exceeded the allowed repetition limit
-                            int maxRepeats = item.IsInThinkingMode ? 3 : 0;
-
-                            if (count >= maxRepeats)
-                            {
-                                _logger.LogWarning("Conversation terminated due to repeating itself: {Line} (repeated {Count} times)", lastLine, count + 1);
-
-                                // This is a duplicate line - remove it from the StringBuilder
-                                RemoveLastLine(item.ResponseBuilder);
-
-                                // It's most likely stuck repeating itself, as smaller models especially tend to do, so just stop it here.
-                                contextConsumed = EndConversation(inferenceItems, contextConsumed, item);
-                                continue;
-                            }
-                        }
-                        else
-                        {
-                            // New line, add to dictionary with count 1
-                            item.LineHistory[lastLine] = 1;
-                        }
-                    }
+                    // New line, add to dictionary with count 1
+                    item.LineHistory[lastLine] = 1;
                 }
-
-                item.ResponseBuilder.Append(tokenText);
-                item.LastTokenText = tokenText;
-
-                //TODO: Consider banning # and * (or ** if that's its own token) for one or two tokens at the start of each line since I'm using my TokenBanner sampler, thereby preventing dumber models from outputting "**Q:**" or "### Here are your flash cards" or whatever.
             }
-
-            // Report progress
-            ProgressChanged?.Invoke(new BatchProgress(
-                contextMaxTokens,
-                contextConsumed,
-                newTokens,
-                [.. inferenceItems.Select(item => item.LastTokenText)],
-                [.. inferenceItems.Select(item => item.IsCompleted)],
-                [.. inferenceItems.Select(item => item.TokensGenerated)]
-            ));
-
-            contextConsumed += newTokens;
         }
-
-        return contextConsumed;
+        return false;
     }
 
     // Helper methods for string operations on StringBuilder
@@ -489,80 +617,26 @@ public class LlamaExecutor : IDisposable
         }
     }
 
-    private static int EndConversation(List<InferenceItem> inferenceItems, int contextConsumed, InferenceItem itemToDispose)
-    {
-        // Free up some KV cache for the remaining conversations and wastes less time on inference for the dead conversation.
-        //TODO: Can't find the source of the bug, not here and not in LlamaSharp, but it seems like the prompt tokens aren't being freed from the KV cache when we dispose the conversation. Might actually be a bug in llama.cpp, as it reports the KV cache being reduced, but then we run into NoKvSlot too soon.
-        itemToDispose.Conversation.Dispose();
-
-        // Subtract this conversation's tokens from contextConsumed
-        contextConsumed -= itemToDispose.TokensGenerated + itemToDispose.PromptTokens;
-
-        // Only remove the group extra tokens for the LAST item sharing that group (aka. extra context), not all of them.
-        if (!inferenceItems.Any(p => p.GroupID == itemToDispose.GroupID && !p.IsCompleted && p != itemToDispose))
-            contextConsumed -= itemToDispose.GroupExtraContextTokens;
-
-        // Mark as completed
-        itemToDispose.IsCompleted = true;
-        itemToDispose.LastTokenText = "";
-        itemToDispose.GroupExtraContextTokens = 0;
-        return contextConsumed;
-    }
-
-    private int PromptConversations(
-        List<string> prompts,
-        List<string?> extraContexts,
-        List<InferenceItem> inferenceItems)
-    {
-        int contextConsumed = _prePromptTokenCount + inferenceItems.DistinctBy(p => p.GroupID).Sum(p => p.GroupExtraContextTokens);
-
-        for (var i = 0; i < inferenceItems.Count; i++)
-        {
-            var originalIndex = inferenceItems[i].OriginalIndex;
-            var prompt = prompts[originalIndex];
-            LLamaToken[] promptTokens;
-            var template = GetTemplate();
-
-            if (string.IsNullOrEmpty(extraContexts[originalIndex]))
-            {
-                promptTokens = template.Apply("user", prompt);
-            }
-            else
-            {
-                // Extra context case - the prompt already started but hasn't ended yet.
-                promptTokens = template.Apply("user", prompt, false, true);
-            }
-
-            inferenceItems[i].PromptTokens = promptTokens.Length;
-            contextConsumed += promptTokens.Length;
-            inferenceItems[i].Conversation.Prompt(promptTokens);
-        }
-
-        return contextConsumed;
-    }
-
-    private static Dictionary<string, List<(int Index, string Prompt)>> GroupPromptsByContext(List<string> prompts, List<string?> extraContexts)
-    {
-        var groupedPrompts = new Dictionary<string, List<(int Index, string Prompt)>>();
-
-        // Process extraContexts and group prompts
-        for (int i = 0; i < prompts.Count; i++)
-        {
-            string contextKey = extraContexts[i] ?? string.Empty;
-            if (!groupedPrompts.TryGetValue(contextKey, out var promptGroup))
-            {
-                groupedPrompts[contextKey] = promptGroup = [];
-            }
-
-            promptGroup.Add((i, prompts[i]));
-        }
-
-        return groupedPrompts;
-    }
-
     public void Dispose()
     {
-        // Only dispose local resources - static resources persist for the application lifetime
+        _loopCts?.Cancel();
+        _processingLoopTask?.Wait(); // Wait for loop to finish cleanup
+        _loopCts?.Dispose();
+
+        // Clear any remaining work
+        while (_pendingWork.TryDequeue(out var request))
+        {
+            request.Tcs.TrySetCanceled();
+        }
+        foreach (var item in _activeItems.Values)
+        {
+            item.Request.Tcs.TrySetCanceled();
+        }
+
+        foreach (var group in _sharedContextGroups.Values) group.Conversation.Dispose();
+        _sharedContextGroups.Clear();
+
         GC.SuppressFinalize(this);
     }
+    #endregion
 }
