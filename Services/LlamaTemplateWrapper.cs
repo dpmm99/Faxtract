@@ -39,8 +39,8 @@ public class LlamaTemplateWrapper(LLamaWeights model, Func<string, bool, LLamaTo
 
         // Find the message in the template text. Use special tokenization for the before and after parts but non-special for the message itself.
         int messageStart = fullText.IndexOf(message);
-        if (messageStart == -1 || (includeBefore && includeAfter)) return [.. tokenizer(fullText[messageStart..], true), .. tokenizer(message, false), .. tokenizer(fullText[..(messageStart + message.Length)], true)];
-        if (!includeBefore) return [.. tokenizer(message, false), .. tokenizer(fullText[..(messageStart + message.Length)], true)];
+        if (messageStart == -1 || (includeBefore && includeAfter)) return [.. tokenizer(fullText[messageStart..], true), .. tokenizer(message, false), .. tokenizer(fullText[(messageStart + message.Length)..], true)];
+        if (!includeBefore) return [.. tokenizer(message, false), .. tokenizer(fullText[(messageStart + message.Length)..], true)];
         /*if (!includeAfter)*/ return [.. tokenizer(fullText[messageStart..], true), .. tokenizer(message, false)];
     }
 }
