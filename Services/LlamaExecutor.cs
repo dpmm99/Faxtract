@@ -1,4 +1,5 @@
-﻿using LLama;
+﻿using Faxtract.Interfaces;
+using LLama;
 using LLama.Batched;
 using LLama.Common;
 using LLama.Native;
@@ -76,8 +77,11 @@ public class LlamaExecutor : IDisposable
             TensorBufferOverrides = [.. _config.GetValue("TensorBufferOverrides", string.Empty)!.Split(';', StringSplitOptions.RemoveEmptyEntries)
                 .Select(p => p.Split('=', StringSplitOptions.RemoveEmptyEntries))
                 .Select(p => new LLama.Abstractions.TensorBufferOverride(p[0], p[1]))],
-            //TypeK = Enum.Parse<GGMLType>(_config.GetValue("TypeK", nameof(GGMLType.GGML_TYPE_Q8_0))!, true), //Note: Other than both Q8_0 or F16, these options generally just crash llama.cpp. Tried F16/Q8_0 and Q8_0/Q4_0, for example, and those both crash. So it pretty much has to be F16/F16 or Q8_0/Q8_0.
-            //TypeV = Enum.Parse<GGMLType>(_config.GetValue("TypeV", nameof(GGMLType.GGML_TYPE_Q8_0))!, true),
+            TensorSplits = new LLama.Abstractions.TensorSplitsCollection([..
+                _config.GetValue("TensorSplits", string.Empty)!.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(float.Parse)]),
+            //TODO: UseJinja = _config.GetValue("UseTemplateFromGguf", false), //But this isn't in LlamaSharp yet.
+            TypeK = Enum.Parse<GGMLType>(_config.GetValue("TypeK", nameof(GGMLType.GGML_TYPE_F16))!, true), //Note: Other than both Q8_0 or F16, these options generally just crash llama.cpp. Tried F16/Q8_0 and Q8_0/Q4_0, for example, and those both crash. So it pretty much has to be F16/F16 or Q8_0/Q8_0.
+            TypeV = Enum.Parse<GGMLType>(_config.GetValue("TypeV", nameof(GGMLType.GGML_TYPE_F16))!, true),
         };
 
         _prePromptFile = Path.Join(AppContext.BaseDirectory, _config["PrePromptFile"] ?? "preprompt.state");
@@ -107,6 +111,12 @@ public class LlamaExecutor : IDisposable
         }
     }
 
+    private static bool IsMistral32Small() => _model!.Metadata.GetValueOrDefault("general.name", "").Contains("Mistral-Small-3.2-24B-Instruct-2506") || _model!.Metadata.GetValueOrDefault("general.basename", "").Contains("Mistral-Small-3.2-24B-Instruct-2506");
+
+    private static IChatTemplate GetTemplate() => IsMistral32Small()
+        ? new MistralSmall32Template(_model!, (text, isSpecial) => _executor!.Context.Tokenize(text, false, isSpecial))
+        : new   LlamaTemplateWrapper(_model!, (text, isSpecial) => _executor!.Context.Tokenize(text, false, isSpecial));
+
     private void InitializeState()
     {
         var tokenCountFile = _prePromptFile + ".tokencount";
@@ -115,11 +125,12 @@ public class LlamaExecutor : IDisposable
         {
             // Create initial conversation with pre-prompt as the system message
             var conversation = _executor!.Create();
-            var template = new LLamaTemplate(_model!);
-            template.Add("system", _prePromptText);
-            var prePromptBytes = template.Apply();
-            var prePromptText = Encoding.UTF8.GetString(prePromptBytes);
-            var prePromptTokens = _executor.Context.Tokenize(prePromptText);
+            //LLamaTemplate version is a bit different because I don't think you can request JUST the BOS token from it.
+            var template = GetTemplate();
+            var conversationStartTokens = template.GetConversationStart();
+            var systemTokens = template.Apply("system", _prePromptText);
+            var prePromptTokens = conversationStartTokens.Concat(systemTokens).ToArray();
+
             _prePromptTokenCount = prePromptTokens.Length; // Store token count
 
             conversation.Prompt(prePromptTokens);
@@ -168,13 +179,13 @@ public class LlamaExecutor : IDisposable
             var groupedPrompts = GroupPromptsByContext(prompts, extraContexts);
 
             // Process each context group and prepare conversations
-            var userMessageTemplateSuffix = await ProcessContextGroups(inferenceItems, groupedPrompts, cancellationToken);
+            await ProcessContextGroups(inferenceItems, groupedPrompts, cancellationToken);
 
             // Sort items by their original index to ensure they're processed in the correct order (not super important, but makes the UI more predictable)
             inferenceItems.Sort((a, b) => a.OriginalIndex.CompareTo(b.OriginalIndex));
 
             // Submit all prompts
-            int contextConsumed = PromptConversations(prompts, extraContexts, inferenceItems, userMessageTemplateSuffix);
+            int contextConsumed = PromptConversations(prompts, extraContexts, inferenceItems);
 
             // Main inference loop
             contextConsumed = await RunBatchInference(contextMaxTokens, inferenceItems, contextConsumed, cancellationToken);
@@ -210,7 +221,7 @@ public class LlamaExecutor : IDisposable
         }
     }
 
-    private async Task<string?> ProcessContextGroups(
+    private async Task ProcessContextGroups(
         List<InferenceItem> inferenceItems,
         Dictionary<string, List<(int Index, string Prompt)>> groupedPrompts,
         CancellationToken cancellationToken)
@@ -221,7 +232,6 @@ public class LlamaExecutor : IDisposable
         // Dictionaries to track forked conversations with their extra-context key and how many tokens they consume
         var groups = new Dictionary<int, (Conversation Conversation, int ContextTokens)>();
 
-        string? userMessageTemplateSuffix = null;
         var groupIndex = 0;
         foreach (var group in groupedPrompts)
         {
@@ -245,25 +255,11 @@ public class LlamaExecutor : IDisposable
                 // Create a new conversation with this extra context by forking from the base
                 var conversation = baseConversation.Fork();
 
-                // Prepare a template with just the extra context
-                var template = new LLamaTemplate(_model!);
-                template.Add("user", _extraContextPrefix + contextKey + _extraContextSuffix);
-                template.AddAssistant = true;
+                var template = GetTemplate();
 
-                // We DON'T want to add whatever portion of the template is after the prompt because this is an incomplete message
-                // We'll get the full template string to extract the suffix part
-                var extraContextString = Encoding.UTF8.GetString(template.Apply());
+                // Get the user message tokens with template formatting, leaving off the closing tokens since there's more text to come.
+                var extraContextTokens = template.Apply("user", _extraContextPrefix + contextKey + _extraContextSuffix, true, false);
 
-                // Find where the actual user message ends to extract the template suffix
-                int messageEndPos = extraContextString.LastIndexOf(_extraContextSuffix) + _extraContextSuffix.Length;
-                if (messageEndPos > 0 && messageEndPos < extraContextString.Length && userMessageTemplateSuffix == null)
-                {
-                    userMessageTemplateSuffix = extraContextString[messageEndPos..]; // Expected to be identical for all contexts
-                }
-
-                // Prompt the conversation with just the extra context part
-                var extraContextTokens = _executor!.Context.Tokenize(
-                    extraContextString[..messageEndPos]);
                 conversation.Prompt(extraContextTokens);
 
                 // Store the conversation for reuse
@@ -301,8 +297,6 @@ public class LlamaExecutor : IDisposable
         // Must run inference if we called Prompt on any conversation since they'll ALL be prompted again
         while (groups.Any(p => p.Value.Conversation.RequiresInference))
             await _executor!.Infer(cancellationToken);
-
-        return userMessageTemplateSuffix;
     }
 
     private async Task<int> RunBatchInference(
@@ -518,34 +512,27 @@ public class LlamaExecutor : IDisposable
     private int PromptConversations(
         List<string> prompts,
         List<string?> extraContexts,
-        List<InferenceItem> inferenceItems,
-        string? userMessageTemplateSuffix)
+        List<InferenceItem> inferenceItems)
     {
         int contextConsumed = _prePromptTokenCount + inferenceItems.DistinctBy(p => p.GroupID).Sum(p => p.GroupExtraContextTokens);
 
         for (var i = 0; i < inferenceItems.Count; i++)
         {
             var originalIndex = inferenceItems[i].OriginalIndex;
-            string prompt = prompts[originalIndex];
-            string? extraContext = extraContexts[originalIndex];
-            string templatedPromptText;
+            var prompt = prompts[originalIndex];
+            LLamaToken[] promptTokens;
+            var template = GetTemplate();
 
-            if (string.IsNullOrEmpty(extraContext))
+            if (string.IsNullOrEmpty(extraContexts[originalIndex]))
             {
-                // No extra context case - use standard template
-                var template = new LLamaTemplate(_model!);
-                template.Add("user", prompt);
-                template.AddAssistant = true;
-
-                templatedPromptText = Encoding.UTF8.GetString(template.Apply());
+                promptTokens = template.Apply("user", prompt);
             }
             else
             {
-                // Just add the prompt text and template suffix (no need for another template.Apply, as we did that when adding the extra context)
-                templatedPromptText = prompt + (userMessageTemplateSuffix ?? "");
+                // Extra context case - the prompt already started but hasn't ended yet.
+                promptTokens = template.Apply("user", prompt, false, true);
             }
 
-            var promptTokens = _executor!.Context.Tokenize(templatedPromptText);
             inferenceItems[i].PromptTokens = promptTokens.Length;
             contextConsumed += promptTokens.Length;
             inferenceItems[i].Conversation.Prompt(promptTokens);
