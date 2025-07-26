@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <UseProjectReferenceForLLamaSharp>false</UseProjectReferenceForLLamaSharp>
+  </PropertyGroup>
+  <!--Allows local overrides on a per-user basis if you make a Directory.Build.user.props file, which is gitignored and has the same contents as this file except for the Import-->
+  <Import Project="Directory.Build.user.props" Condition="Exists('Directory.Build.user.props')" />
+</Project>
