@@ -173,6 +173,9 @@ public class LlamaExecutor : IDisposable
         {
             if (_allowContinuousBatching || _activeItems.IsEmpty)
             {
+                // Even in non-continuous batching mode, llama.cpp crashes, running out of KV cache.
+                if (!_allowContinuousBatching) { _executor.Dispose(); _executor = null; InitializeExecutor(); }
+
                 // 1. Add new work if there's space
                 while (_activeItems.Count < _maxParallelConversations && _pendingWork.TryPeek(out var request))
                 {
