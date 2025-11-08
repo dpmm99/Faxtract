@@ -2,6 +2,7 @@ using Faxtract.Hubs;
 using Faxtract.Interfaces;
 using Faxtract.Models;
 using Faxtract.Services;
+using LLama.Native;
 
 namespace Faxtract;
 
@@ -12,6 +13,18 @@ public class Program
         var builder = WebApplication.CreateBuilder(args);
         builder.Configuration.AddUserSecrets<Program>(optional: true);
 
+        // If you set an environment variable LLAMA_PRESET (e.g. via launch profile),
+        // load appsettings.<preset>.json on top of appsettings.json so it can override values.
+        var preset = Environment.GetEnvironmentVariable("LLAMA_PRESET")
+                     ?? builder.Configuration["LLAMA_PRESET"];
+        if (!string.IsNullOrEmpty(preset))
+        {
+            // Allow only safe filename characters to avoid path traversal.
+            var safe = new string([.. preset.Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_' || c == '.')]);
+            var presetFile = $"appsettings.{safe}.json";
+            builder.Configuration.AddJsonFile(presetFile, optional: true, reloadOnChange: true);
+        }
+
         // Add services to the container.
         builder.Services.AddControllersWithViews();
         builder.Services.AddSignalR();
@@ -20,6 +33,9 @@ public class Program
         builder.Services.AddSingleton<LlamaExecutor>();
         builder.Services.AddSingleton<StorageService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkProcessor>());
+        NativeLibraryConfig.All
+            .WithVulkan(builder.Configuration.GetValue<bool>("LLamaConfig:AllowVulkan"))
+            .WithCuda(builder.Configuration.GetValue<bool>("LLamaConfig:AllowCuda"));
 
         var app = builder.Build();
 

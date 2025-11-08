@@ -404,3 +404,21 @@ button, a.btn {
 button:disabled, a.btn:disabled {
     background-color: #bbb;
 }
+
+/* Visual for rewound text that fades away */
+.rewind-fade {
+    display: inline-block;
+    margin-left: 6px;
+    color: inherit;
+    background: transparent;
+    transition: opacity 500ms ease, transform 500ms ease;
+    opacity: 1;
+    transform: translateY(0);
+    /* Reduce pointer events so it doesn't interfere */
+    pointer-events: none;
+}
+
+    .rewind-fade.fading {
+        opacity: 0;
+        transform: translateY(-6px);
+    }

@@ -1,9 +1,11 @@
 ﻿using Faxtract.Interfaces;
 using Faxtract.Models;
+using Faxtract.Sampling;
 using LLama;
 using LLama.Batched;
 using LLama.Common;
 using LLama.Native;
+using Microsoft.VisualBasic;
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
@@ -23,6 +25,7 @@ public class LlamaExecutor : IDisposable
     // Continuous batching toggle and settings
     private readonly bool _allowContinuousBatching;
     private readonly int _maxParallelConversations;
+    private bool _didWork;
 
     // Pre-prompt and context settings
     private readonly string _prePromptFile;
@@ -88,8 +91,9 @@ public class LlamaExecutor : IDisposable
         public int TokensGenerated { get; set; }
         public SharedContextGroup SharedContext { get; } = sharedContext;
         public InferenceRequest Request { get; } = request;
-        public bool IsInThinkingMode { get; set; } // Assuming this is for future use
+        public bool IsInThinkingMode { get; set; }
         public Dictionary<string, int>? LineHistory { get; set; }
+        public List<int> GeneratedTokenLengths { get; } = []; //Isn't strictly necessary; can be determined from RecentTokens. But then RecentTokens needs to be long enough for all rewinds.
 
         /// <summary>
         /// The current state of the inference item in the batching lifecycle.
@@ -107,10 +111,13 @@ public class LlamaExecutor : IDisposable
         /// shared context is processed and the conversation can be forked.
         /// </summary>
         public LLamaToken[] PromptTokens { get; } = promptTokens;
+
+        public int LastRewindCharCount { get; set; }
     }
     #endregion
 
-    public record BatchProgress(int ContextMaxTokens, int UsedTokens, int NewTokens, IReadOnlyDictionary<int, string> CurrentResponses, IReadOnlySet<int> CompletedMask, IReadOnlyDictionary<int, int> TokensPerResponse);
+    public record ResponseInfo(string Text, int RewindChars = 0);
+    public record BatchProgress(int ContextMaxTokens, int UsedTokens, int NewTokens, IReadOnlyDictionary<int, ResponseInfo> CurrentResponses, IReadOnlySet<int> CompletedMask, IReadOnlyDictionary<int, int> TokensPerResponse);
 
     public BatchedExecutor Executor => _executor ?? throw new InvalidOperationException("Executor not initialized");
 
@@ -174,7 +181,7 @@ public class LlamaExecutor : IDisposable
             if (_allowContinuousBatching || _activeItems.IsEmpty)
             {
                 // Even in non-continuous batching mode, llama.cpp crashes, running out of KV cache.
-                if (!_allowContinuousBatching) { _executor.Dispose(); _executor = null; InitializeExecutor(); }
+                if (!_allowContinuousBatching && _didWork) { _executor?.Dispose(); _executor = null; InitializeExecutor(); _didWork = false; }
 
                 // 1. Add new work if there's space
                 while (_activeItems.Count < _maxParallelConversations && _pendingWork.TryPeek(out var request))
@@ -188,6 +195,7 @@ public class LlamaExecutor : IDisposable
                     _pendingWork.TryDequeue(out _); //We used TryPeek to decide if we're *allowed* to do more work, so dequeue now. The alternative (dequeue and re-enqueue) would get the queue out of order, which is detrimental to performance when different requests have different extraContext.
                     _activeItems[request.Id] = newItem;
                     _logger.LogDebug("Added request {Id} to active batch with state {State}. Active count: {Count}", request.Id, newItem.State, _activeItems.Count);
+                    _didWork = true;
                 }
             }
 
@@ -232,6 +240,7 @@ public class LlamaExecutor : IDisposable
         // Use a list to iterate as we may modify the _activeItems dictionary
         foreach (var item in _activeItems.Values.ToList())
         {
+            item.LastRewindCharCount = 0;
             switch (item.State)
             {
                 case InferenceItemState.AwaitingSharedContextProcessing:
@@ -267,6 +276,11 @@ public class LlamaExecutor : IDisposable
                     newTokensInStep++;
                     var token = item.Sampler.Sample(_executor!.Context.NativeHandle, item.Conversation.GetSampleIndex());
                     item.TokensGenerated++;
+                    if (item.Sampler.TokensToRewind > 0)
+                    {
+                        Rewind(item);
+                        continue; //TODO: Do we have to Prompt in order to rewind successfully?
+                    }
 
                     if (token.IsEndOfGeneration(_model!.Vocab) || CheckForRepetition(item, token))
                     {
@@ -287,11 +301,40 @@ public class LlamaExecutor : IDisposable
                     }
 
                     item.ResponseBuilder.Append(tokenText);
+                    item.GeneratedTokenLengths.Add(tokenText.Length);
                     item.LastTokenText = tokenText;
                     break;
             }
         }
         return newTokensInStep;
+    }
+
+    private static void Rewind(InferenceItem item)
+    {
+        // The sampler requested a rewind, so do it--we have to rewind the conversation, sampler, response, *and* recent tokens.
+        // Note: TokenBanner and TextBanner each maintain their own limited state based on their own max expected rewind, so
+        // rewinding may not work as intended if they're both used and have very different ban sequence lengths or if you rewind
+        // for other reasons.
+        item.Conversation!.Rewind(item.Sampler.TokensToRewind + 1); //+1 because I'm re-prompting it with the last known ALLOWED token.
+        item.Sampler.Rewind(item.Sampler.TokensToRewind);
+
+        int charactersToRewind = item.GeneratedTokenLengths
+            .GetRange(item.GeneratedTokenLengths.Count - item.Sampler.TokensToRewind, item.Sampler.TokensToRewind).Sum();
+        item.ResponseBuilder.Remove(item.ResponseBuilder.Length - charactersToRewind, charactersToRewind);
+        item.GeneratedTokenLengths.RemoveRange(item.GeneratedTokenLengths.Count - item.Sampler.TokensToRewind, item.Sampler.TokensToRewind);
+
+        // Rebuild RecentTokens without those last ones
+        var recentTokensList = item.RecentTokens.ToList();
+        recentTokensList.RemoveRange(recentTokensList.Count - item.Sampler.TokensToRewind, item.Sampler.TokensToRewind);
+        item.RecentTokens.Clear();
+        foreach (var t in recentTokensList) item.RecentTokens.Enqueue(t);
+
+        // Have to adjust the state after rewinding
+        //TODO: I should be able to keep the last n inferred logits and rewind one less token, and adjust the logits for that next point, re-sample, re-Prompt... to save rerunning inference for *one* token.
+        item.Conversation!.Prompt(recentTokensList[^1]); // This sets RequiresInference to true for the next loop
+
+        // For UI update
+        item.LastRewindCharCount = charactersToRewind;
     }
 
     private void HandleCompletedItem(InferenceItem item, string? reason = null)
@@ -331,6 +374,22 @@ public class LlamaExecutor : IDisposable
         var promptTokens = template.Apply("user", request.Prompt, false, true);
         var contextKey = request.ExtraContext ?? string.Empty;
 
+        InferenceItem create(SharedContextGroup group)
+        {
+            var newItem = new InferenceItem(request, group, promptTokens,
+                new StreamingTokenDecoder(_executor!.Context),
+                new DistributionSamplingPipelineThatStops(_model!, _config),
+                // The state depends on whether the group itself has been processed yet.
+                group.IsProcessed ? InferenceItemState.AwaitingPromptProcessing : InferenceItemState.AwaitingSharedContextProcessing);
+
+            //Allow banning text sequences from the config.
+            newItem.Sampler.BanTextSequences(_config.GetSection("BannedTextSequences").Get<string[]>()?
+                .Select(c => new KeyValuePair<string, int>(c, -1)) ?? []);
+            //TODO: Could even use temporary text-allow sequences like ["\n", "A.", "A. "] to force proper question/answer format after a line break.
+
+            return newItem;
+        }
+
         if (!_sharedContextGroups.TryGetValue(contextKey, out var group))
         {
             // --- This is a new context group ---
@@ -360,10 +419,7 @@ public class LlamaExecutor : IDisposable
 
             // Create the item in a state that indicates its shared context needs processing.
             // We pass the promptTokens to be used *after* the shared context is processed.
-            var newItem = new InferenceItem(request, group, promptTokens,
-                new StreamingTokenDecoder(_executor!.Context),
-                new DistributionSamplingPipelineThatStops(_model!, _config),
-                InferenceItemState.AwaitingSharedContextProcessing);
+            var newItem = create(group);
 
             group.ReferenceCount++;
             return newItem;
@@ -379,11 +435,7 @@ public class LlamaExecutor : IDisposable
             }
 
             // The item can be created in a state that indicates its specific prompt needs processing.
-            var newItem = new InferenceItem(request, group, promptTokens,
-                new StreamingTokenDecoder(_executor!.Context),
-                new DistributionSamplingPipelineThatStops(_model!, _config),
-                // The state depends on whether the group itself has been processed yet.
-                group.IsProcessed ? InferenceItemState.AwaitingPromptProcessing : InferenceItemState.AwaitingSharedContextProcessing);
+            var newItem = create(group);
 
             // If the group is already processed, we can fork and prompt immediately.
             if (newItem.State == InferenceItemState.AwaitingPromptProcessing)
@@ -406,8 +458,20 @@ public class LlamaExecutor : IDisposable
         var allItems = _activeItems.Concat(_recentlyCompletedItems).ToDictionary(kv => kv.Key, kv => kv.Value);
 
         var completed = _recentlyCompletedItems.Keys.ToHashSet();
-        var responses = allItems.ToDictionary(kv => kv.Key, kv => kv.Value.LastTokenText);
-        var tokensPer = allItems.ToDictionary(kv => kv.Key, kv => kv.Value.TokensGenerated);
+
+        // Build a map id -> ResponseInfo (text + rewind count)
+        var responses = allItems.ToDictionary(
+            kv => kv.Key,
+            kv =>
+            {
+                var itm = kv.Value;
+                var info = new ResponseInfo(itm.LastTokenText ?? "", itm.LastRewindCharCount);
+                // Clear the per-item rewind count after reporting so it's one-shot
+                itm.LastRewindCharCount = 0;
+                return info;
+            });
+
+        var tokensPer = allItems.ToDictionary(kv => kv.Key, kv => kv.Value.TokensGenerated); //TODO: Make this consistent. Why have an object in one spot and parallel dictionaries/hash sets otherwise?
 
         ProgressChanged.Invoke(new BatchProgress(
             (int)_parameters.ContextSize!,

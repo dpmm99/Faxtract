@@ -108,7 +108,9 @@ connection.on("UpdateStatus", (processed, remaining, currentWork, tokensPerSecon
             `${w.id.fileId || ''}-${w.id.startPosition}-${w.id.endPosition}` :
             JSON.stringify(w.id);
 
+        // New: server now sends response (string) and rewindChars (int)
         const newToken = w.response ?? '';
+        const rewindChars = w.rewindChars || 0;
 
         // Get or create work item element - to optimize performance by making the minimum possible DOM manipulations
         let workItemEl = workItemElements.get(key);
@@ -141,7 +143,38 @@ connection.on("UpdateStatus", (processed, remaining, currentWork, tokensPerSecon
         const statusEl = workItemEl.querySelector('.status-line');
         statusEl.textContent = `Status: ${w.status}`;
 
-        // Only append new tokens if processing isn't complete
+        // If a rewind is reported, remove characters (one-shot)
+        if (rewindChars > 0) {
+            // Update in-memory history
+            const existing = responseHistory.get(key) ?? '';
+            const newText = existing.slice(0, Math.max(0, existing.length - rewindChars));
+            const removedText = existing.slice(Math.max(0, existing.length - rewindChars));
+
+            responseHistory.set(key, newText);
+
+            // Update DOM and show fade-away animation for removed text
+            const responseEl = workItemEl.querySelector('.response-content');
+            // Create a fading element to show removed text and then fade out
+            if (removedText) {
+                const fadeSpan = document.createElement('span');
+                fadeSpan.className = 'rewind-fade';
+                fadeSpan.textContent = removedText;
+
+                // Insert after the pre so it sits visually after the current content
+                responseEl.parentNode.insertBefore(fadeSpan, responseEl.nextSibling);
+
+                // Trigger CSS transition on next tick
+                requestAnimationFrame(() => fadeSpan.classList.add('fading'));
+
+                // Remove the fade span after animation
+                fadeSpan.addEventListener('transitionend', () => fadeSpan.remove(), { once: true });
+            }
+
+            // Set remaining text immediately
+            responseEl.textContent = newText;
+        }
+
+        // Only append new tokens if processing isn't complete and we actually have new token text
         if (!w.status.includes("Processing complete") && newToken) {
             // Get existing response or initialize
             const existingResponse = responseHistory.get(key) ?? '';

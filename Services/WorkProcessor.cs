@@ -12,7 +12,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
 {
     private readonly int _workBatchSize = configuration.GetSection("LLamaConfig").GetValue("WorkBatchSize", 4);
     private static int _processedCount;
-    private static readonly ConcurrentDictionary<TextChunk, (string Status, string Response)> _currentWork = new();
+    private static readonly ConcurrentDictionary<TextChunk, (string Status, string Response, int RewindChars)> _currentWork = new();
     private static DateTime? _processingStartTime;
     private static long _totalTokensProcessed;
     public static long TotalTokensProcessed => _totalTokensProcessed;
@@ -31,12 +31,13 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
     }
 
     public static IEnumerable<dynamic> CurrentWork => _currentWork.Where(p => p.Value.Status != "Queued")
-        .Select(kv => new
-        {
-            id = kv.Key,
-            status = kv.Value.Status,
-            response = kv.Value.Response
-        });
+    .Select(kv => new
+    {
+        id = kv.Key,
+        status = kv.Value.Status,
+        response = kv.Value.Response,
+        rewindChars = kv.Value.RewindChars
+    });
     public static int ProcessedCount => _processedCount;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -91,7 +92,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
 
                 // Add items to the central tracking dictionary
                 foreach (var item in batch)
-                    _currentWork[item] = ("Queued", "");
+                    _currentWork[item] = ("Queued", "", 0);
 
                 await BroadcastStatus();
 
@@ -146,7 +147,16 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
             // Update the status and response for this chunk
             if (_currentWork.TryGetValue(chunk, out var currentValue))
             {
-                _currentWork[chunk] = (message, progress.CurrentResponses.TryGetValue(id, out var response) ? response : currentValue.Response);
+                //_currentWork[chunk] = (message, progress.CurrentResponses.TryGetValue(id, out var response) ? response : currentValue.Response);
+                // progress.CurrentResponses now maps id -> ResponseInfo
+                if (progress.CurrentResponses.TryGetValue(id, out var responseInfo))
+                {
+                    _currentWork[chunk] = (message, responseInfo.Text ?? currentValue.Response, responseInfo.RewindChars);
+                }
+                else
+                {
+                    _currentWork[chunk] = (message, currentValue.Response, 0);
+                }
             }
         }
 
@@ -202,13 +212,13 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
             {
                 logger.LogError(task.Exception, "A single request processing task failed for chunk {ChunkId}.", originalChunk.Id);
                 if (_currentWork.ContainsKey(originalChunk))
-                    _currentWork[originalChunk] = ("Failed: " + (task.Exception?.InnerException?.Message ?? "Unknown error"), "");
+                    _currentWork[originalChunk] = ("Failed: " + (task.Exception?.InnerException?.Message ?? "Unknown error"), "", 0);
             }
             else if (task.IsCanceled)
             {
                 logger.LogWarning("A single request processing task was canceled for chunk {ChunkId}.", originalChunk.Id);
                 if (_currentWork.ContainsKey(originalChunk))
-                    _currentWork[originalChunk] = ("Cancelled", "");
+                    _currentWork[originalChunk] = ("Cancelled", "", 0);
             }
             else // Task completed successfully
             {
@@ -222,7 +232,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
 
                     if (_currentWork.ContainsKey(originalChunk))
                     {
-                        _currentWork[originalChunk] = ($"Completed: {flashCards.Count} cards created", "");
+                        _currentWork[originalChunk] = ($"Completed: {flashCards.Count} cards created", "", 0);
                         Interlocked.Increment(ref _processedCount);
                     }
                 }
@@ -230,7 +240,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
                 {
                     if (_currentWork.ContainsKey(originalChunk))
                     {
-                        _currentWork[originalChunk] = ("Failed: No flashcards parsed from LLM response.", "");
+                        _currentWork[originalChunk] = ("Failed: No flashcards parsed from LLM response.", "", 0);
                     }
                 }
             }
@@ -239,7 +249,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
         {
             logger.LogError(ex, "An unexpected error occurred in HandleRequestCompletion for chunk {ChunkId}.", originalChunk.Id);
             if (_currentWork.ContainsKey(originalChunk))
-                _currentWork[originalChunk] = ("Failed", "Internal completion error");
+                _currentWork[originalChunk] = ("Failed", "Internal completion error", 0);
         }
         finally
         {
