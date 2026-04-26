@@ -14,14 +14,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="HtmlAgilityPack" Version="1.12.1" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.5" />
-    <PackageReference Include="PdfPig" Version="0.1.10" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <PackageReference Include="PdfPig" Version="0.1.14" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseProjectReferenceForLLamaSharp)' != 'true' Or !Exists('..\..\NotMine\LLamaSharp\LLama\LLamaSharp.Runtime.targets')">
-    <PackageReference Include="LLamaSharp" Version="0.24.0" />
-    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" Version="0.24.0" />
+    <PackageReference Include="LLamaSharp" Version="0.27.0" />
+    <PackageReference Include="LLamaSharp.Backend.Vulkan.Windows" Version="0.27.0" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(UseProjectReferenceForLLamaSharp)' == 'true' And Exists('..\..\NotMine\LLamaSharp\LLama\LLamaSharp.Runtime.targets')">

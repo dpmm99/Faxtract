@@ -145,6 +145,7 @@ public class LlamaExecutor : IDisposable
             //TODO: UseJinja = _config.GetValue("UseTemplateFromGguf", false), //But this isn't in LlamaSharp yet.
             TypeK = Enum.Parse<GGMLType>(_config.GetValue("TypeK", nameof(GGMLType.GGML_TYPE_F16))!, true), //Note: Other than both Q8_0 or F16, these options generally just crash llama.cpp. Tried F16/Q8_0 and Q8_0/Q4_0, for example, and those both crash. So it pretty much has to be F16/F16 or Q8_0/Q8_0.
             TypeV = Enum.Parse<GGMLType>(_config.GetValue("TypeV", nameof(GGMLType.GGML_TYPE_F16))!, true),
+            SeqMax = (uint)_maxParallelConversations + 2 // Some bug in llama.cpp makes it count badly, it seems. Verified that 6 run concurrently and _maxParallelConversations was 6, yet SeqMax = 6 caused an error, saying sequence number 6 >= max sequences. It DOES start counting at 1. Didn't check if +2 is overkill.
         };
 
         _prePromptFile = Path.Join(AppContext.BaseDirectory, _config["PrePromptFile"] ?? "preprompt.state");
