@@ -955,7 +955,7 @@ function restoreChunk(chunkId) {
         });
 }
 
-// Resubmit a deleted chunk for processing
+ // Resubmit a deleted chunk for processing
 function resubmitChunk(chunkId) {
     // Get the chunk from our local chunks map
     const chunk = chunks.get(chunkId);
@@ -1004,3 +1004,144 @@ function resubmitChunk(chunkId) {
             uploadStatus.innerHTML = `<div class="alert alert-danger">Upload failed: ${error.message}</div>`;
         });
 }
+
+// Experiment mode support
+let isExperimentMode = false;
+let experimentWorkItems = new Map();
+
+async function checkExperimentMode() {
+    try {
+        const response = await fetch('Home/GetExperimentModeStatus');
+        const data = await response.json();
+        isExperimentMode = data.isExperimentMode;
+
+        const modeTitle = document.getElementById('modeTitle');
+        const contextHelpText = document.getElementById('contextHelpText');
+        const experimentDetails = document.getElementById('experimentDetails');
+
+        if (isExperimentMode) {
+            modeTitle.textContent = 'LLM Experiment';
+            contextHelpText.textContent = 'This context will be provided to the AI to help evaluate and improve KnowledgeNode code generation.';
+            experimentDetails.style.display = 'block';
+        } else {
+            modeTitle.textContent = 'Generate Flash Cards';
+            contextHelpText.textContent = 'This context will be provided to the AI to help generate more relevant flash cards.';
+            experimentDetails.style.display = 'none';
+        }
+    } catch (error) {
+        console.error('Error checking experiment mode:', error);
+    }
+}
+
+connection.on("UpdateExperimentStatus", (processed, remaining, currentWork, tokensPerSecond, totalTokens) => {
+    // Update status counters
+    document.getElementById("processed").textContent = processed;
+    document.getElementById("remaining").textContent = remaining;
+    document.getElementById("tokensGenerated").textContent = totalTokens || "0";
+    document.getElementById("tokensPerSecond").textContent =
+        tokensPerSecond ? tokensPerSecond.toFixed(1) : "-";
+
+    const experimentWorkDiv = document.getElementById("experimentWork");
+    document.getElementById("experimentIdle")?.remove();
+
+    // Track experiment work items
+    const currentWorkIds = new Set();
+    currentWork.forEach(w => {
+        currentWorkIds.add(w.id);
+        experimentWorkItems.set(w.id, w);
+    });
+
+    // Remove items that are no longer present
+    for (const [id, item] of experimentWorkItems.entries()) {
+        if (!currentWorkIds.has(id)) {
+            experimentWorkItems.delete(id);
+            const itemEl = document.getElementById(`experiment-work-item-${id}`);
+            if (itemEl) itemEl.remove();
+        }
+    }
+
+    // Process each experiment work item
+    currentWork.forEach(w => {
+        const workItemEl = document.createElement('div');
+        workItemEl.id = `experiment-work-item-${w.id}`;
+        workItemEl.className = 'work-item experiment-item';
+
+        const statusEl = document.createElement('div');
+        statusEl.className = 'status-line experiment-status-line';
+        statusEl.textContent = `Iteration ${w.iteration} (${w.kind}): ${w.status}`;
+        statusEl.addEventListener('click', function () {
+            workItemEl.classList.toggle('collapsed');
+        });
+
+        const responseLabel = document.createElement('div');
+        responseLabel.textContent = 'Response:';
+        responseLabel.className = 'response-label';
+
+        const responseEl = document.createElement('pre');
+        responseEl.className = 'response-content';
+        responseEl.textContent = w.response || '';
+
+        workItemEl.appendChild(statusEl);
+        workItemEl.appendChild(responseLabel);
+        workItemEl.appendChild(responseEl);
+
+        experimentWorkDiv.appendChild(workItemEl);
+    });
+});
+
+async function loadExperimentSteps(lineHash) {
+    try {
+        const response = await fetch(`Home/GetExperimentSteps?lineHash=${encodeURIComponent(lineHash)}`);
+        const steps = await response.json();
+
+        const experimentStepsDiv = document.getElementById('experimentSteps');
+        experimentStepsDiv.innerHTML = '';
+
+        if (steps.length === 0) {
+            experimentStepsDiv.innerHTML = '<p>No experiment steps found.</p>';
+            return;
+        }
+
+        steps.forEach(step => {
+            const stepDiv = document.createElement('div');
+            stepDiv.className = 'experiment-step';
+
+            const stepHeader = document.createElement('h4');
+            stepHeader.textContent = `Step ${step.iteration} (${step.kind}) - ${new Date(step.timestamp).toLocaleString()}`;
+            stepHeader.className = 'step-header';
+            stepHeader.style.cursor = 'pointer';
+            stepHeader.addEventListener('click', function () {
+                stepDetails.classList.toggle('hidden');
+            });
+
+            const stepDetails = document.createElement('div');
+            stepDetails.className = 'step-details';
+
+            const lineContent = document.createElement('div');
+            lineContent.innerHTML = `<strong>Original Line:</strong><pre>${escapeHtml(step.lineContent)}</pre>`;
+
+            const responseContent = document.createElement('div');
+            responseContent.innerHTML = `<strong>Response:</strong><pre>${escapeHtml(step.response)}</pre>`;
+
+            if (step.feedback) {
+                const feedbackContent = document.createElement('div');
+                feedbackContent.innerHTML = `<strong>Feedback:</strong><pre>${escapeHtml(step.feedback)}</pre>`;
+                stepDetails.appendChild(feedbackContent);
+            }
+
+            stepDetails.appendChild(lineContent);
+            stepDetails.appendChild(responseContent);
+
+            stepDiv.appendChild(stepHeader);
+            stepDiv.appendChild(stepDetails);
+            experimentStepsDiv.appendChild(stepDiv);
+        });
+    } catch (error) {
+        console.error('Error loading experiment steps:', error);
+        document.getElementById('experimentSteps').innerHTML =
+            `<div class="alert alert-danger">Failed to load experiment steps: ${error.message}</div>`;
+    }
+}
+
+// Check experiment mode when the page loads
+document.addEventListener('DOMContentLoaded', checkExperimentMode);

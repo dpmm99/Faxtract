@@ -6,7 +6,7 @@
 <div class="container">
     <div class="top-container">
         <form method="post" enctype="multipart/form-data" id="uploadForm">
-            <h3>Generate Flash Cards</h3>
+            <h3 id="modeTitle">Generate Flash Cards</h3>
             <div asp-validation-summary="All" class="text-danger"></div>
 
             <div class="input-selector">
@@ -32,7 +32,7 @@
             <div class="form-group mt-3">
                 <label for="extraContext">Extra Context (Optional)</label>
                 <textarea name="extraContext" id="extraContext" class="form-control" rows="3" placeholder="Add additional context for the LLM, e.g., 'These are about algorithms; no history questions.'"></textarea>
-                <small class="text-muted">This context will be provided to the AI to help generate more relevant flash cards.</small>
+                <small class="text-muted" id="contextHelpText">This context will be provided to the AI to help generate more relevant flash cards.</small>
             </div>
             <div class="form-check mt-2">
                 <input class="form-check-input" type="checkbox" id="stripHtml" name="stripHtml">
@@ -54,6 +54,16 @@
             <p>Processing Speed: <span id="tokensPerSecond">-</span> tokens/sec</p>
         </div>
         <div id="currentWork"><span id="idle">Idle</span></div>
+    </details>
+
+    <details id="experimentDetails" style="display:none">
+        <summary><h3>LLM Experiment</h3></summary>
+        <div class="experiment-status">
+            <p>Experiment mode is active. Each uploaded line will go through a write-judgment-correction cycle.</p>
+            <p>Max iterations: <span id="maxIterations">4</span></p>
+        </div>
+        <div id="experimentWork"><span id="experimentIdle">No experiments running</span></div>
+        <div id="experimentSteps" class="mt-3"></div>
     </details>
     <br />
 

@@ -422,3 +422,55 @@ button:disabled, a.btn:disabled {
         opacity: 0;
         transform: translateY(-6px);
     }
+
+/* Experiment mode styles */
+.experiment-status {
+    margin: 20px auto;
+    max-width: 25em;
+    padding: 15px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.experiment-item {
+    border-color: #4a6da7;
+    background-color: #f8f9ff;
+}
+
+.experiment-status-line {
+    color: #4a6da7;
+    font-weight: 600;
+}
+
+.experiment-step {
+    margin-bottom: 15px;
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background-color: #fff;
+}
+
+.step-header {
+    margin: 0 0 10px 0;
+    color: #4a6da7;
+}
+
+.step-details {
+    padding-left: 15px;
+    border-left: 2px solid #4a6da7;
+}
+
+.step-details.hidden {
+    display: none;
+}
+
+.step-details pre {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin: 5px 0;
+    padding: 8px;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+    font-size: 0.9em;
+}

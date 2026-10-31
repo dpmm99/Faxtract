@@ -32,7 +32,11 @@ public class LlamaExecutor : IDisposable
     private readonly string _prePromptText;
     private readonly string _extraContextPrefix;
     private readonly string _extraContextSuffix;
+    private readonly string? _judgmentPrePromptFile;
+    private readonly string? _judgmentPrePromptText;
     private int _prePromptTokenCount;
+    private readonly Dictionary<string, string> _prePromptCache = new();
+    private readonly object _prePromptLock = new();
 
     // Continuous batching state
     private readonly ConcurrentQueue<InferenceRequest> _pendingWork = new();
@@ -152,6 +156,8 @@ public class LlamaExecutor : IDisposable
         _prePromptText = _config["PrePromptText"] ?? string.Empty;
         _extraContextPrefix = _config["ExtraContextPrefix"] ?? "(Context for the flash cards: ";
         _extraContextSuffix = _config["ExtraContextSuffix"] ?? ")\n";
+        _judgmentPrePromptFile = _config["PrePromptJudgmentFile"] != null ? Path.Join(AppContext.BaseDirectory, _config["PrePromptJudgmentFile"]!) : null;
+        _judgmentPrePromptText = _config["PrePromptJudgmentText"] ?? string.Empty;
 
         InitializeExecutor();
 
@@ -408,7 +414,7 @@ public class LlamaExecutor : IDisposable
                 return null;
             }
 
-            var baseConversation = CreateConversation();
+            var baseConversation = CreateConversation(request.PrePromptKind);
             if (extraContextTokens.Length > 0)
             {
                 baseConversation.Prompt(extraContextTokens);
@@ -561,6 +567,80 @@ public class LlamaExecutor : IDisposable
     }
 
     public Conversation CreateConversation() => _executor!.Load(_prePromptFile);
+
+    public Conversation CreateConversation(PrePromptKind kind)
+    {
+        EnsurePrePrompt(kind);
+        var stateFile = kind switch
+        {
+            PrePromptKind.Judgment => _judgmentPrePromptFile ?? _prePromptFile,
+            PrePromptKind.Write => _prePromptFile,
+            PrePromptKind.Correction => _prePromptFile,
+            _ => _prePromptFile
+        };
+        return _executor!.Load(stateFile);
+    }
+
+    private void EnsurePrePrompt(PrePromptKind kind)
+    {
+        lock (_prePromptLock)
+        {
+            var key = kind.ToString();
+            if (_prePromptCache.ContainsKey(key)) return;
+
+            string stateFile;
+            string text;
+
+            if (kind == PrePromptKind.Judgment)
+            {
+                if (string.IsNullOrEmpty(_judgmentPrePromptFile) || string.IsNullOrEmpty(_judgmentPrePromptText))
+                {
+                    // Fallback to flash card pre-prompt if judgment pre-prompt not configured
+                    stateFile = _prePromptFile;
+                    text = _prePromptText;
+                }
+                else
+                {
+                    stateFile = _judgmentPrePromptFile!;
+                    text = _judgmentPrePromptText!;
+                }
+            }
+            else
+            {
+                stateFile = _prePromptFile;
+                text = _prePromptText;
+            }
+
+            var tokenCountFile = stateFile + ".tokencount";
+            int tokenCount = 0;
+
+            if (!File.Exists(stateFile))
+            {
+                var conversation = _executor!.Create();
+                var template = GetTemplate();
+                var conversationStartTokens = template.GetConversationStart();
+                var systemTokens = template.Apply("system", text);
+                var prePromptTokens = conversationStartTokens.Concat(systemTokens).ToArray();
+
+                tokenCount = prePromptTokens.Length;
+                conversation.Prompt(prePromptTokens);
+                _executor.Infer().Wait();
+
+                conversation.Save(stateFile);
+                File.WriteAllText(tokenCountFile, tokenCount.ToString());
+                conversation.Dispose();
+
+                _logger.LogInformation("Created pre-prompt state file for {Kind} at {Path}", kind, stateFile);
+            }
+            else if (File.Exists(tokenCountFile))
+            {
+                int.TryParse(File.ReadAllText(tokenCountFile), out tokenCount);
+            }
+
+            _prePromptCache[key] = stateFile;
+            _prePromptTokenCount = Math.Max(_prePromptTokenCount, tokenCount);
+        }
+    }
 
     private static bool CheckForRepetition(InferenceItem item, LLamaToken token)
     {

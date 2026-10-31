@@ -11,8 +11,12 @@ namespace Faxtract.Services;
 public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubContext, LlamaExecutor executor, StorageService storageService, IConfiguration configuration, ILogger<WorkProcessor> logger) : BackgroundService
 {
     private readonly int _workBatchSize = configuration.GetSection("LLamaConfig").GetValue("WorkBatchSize", 4);
+    private readonly bool _isExperimentMode = configuration.GetSection("LLamaConfig").GetValue("LlmAsJudge", false);
+    private readonly int _maxIterations = configuration.GetSection("LLamaConfig").GetValue("MaxIterations", 4);
+    private readonly ExperimentStorageService _experimentStorage = new();
     private static int _processedCount;
     private static readonly ConcurrentDictionary<TextChunk, (string Status, string Response, int RewindChars)> _currentWork = new();
+    private static readonly ConcurrentDictionary<int, (string Status, string Response, int RewindChars, int Iteration, PrePromptKind Kind)> _experimentWork = new();
     private static DateTime? _processingStartTime;
     private static long _totalTokensProcessed;
     public static long TotalTokensProcessed => _totalTokensProcessed;
@@ -83,7 +87,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
                 }
 
                 //Reset the performance information because nothing was processing--don't want to say 0.1 tokens per second if we did a few chunks at 1000/second, waited an hour, and started another chunk.
-                if (_currentWork.IsEmpty)
+                if (_currentWork.IsEmpty && _experimentWork.IsEmpty)
                 {
                     _processingStartTime = null;
                     _totalTokensProcessed = 0;
@@ -92,7 +96,17 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
 
                 // Add items to the central tracking dictionary
                 foreach (var item in batch)
-                    _currentWork[item] = ("Queued", "", 0);
+                {
+                    if (_isExperimentMode)
+                    {
+                        var hash = item.Content.GetHashCode().ToString("X8");
+                        _experimentWork[item.Id] = ("Queued", "", 0, 0, PrePromptKind.Write);
+                    }
+                    else
+                    {
+                        _currentWork[item] = ("Queued", "", 0);
+                    }
+                }
 
                 await BroadcastStatus();
 
@@ -104,6 +118,7 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
             // Unsubscribe on shutdown
             executor.ProgressChanged -= OnLlamaProgressChanged;
             _currentWork.Clear();
+            _experimentWork.Clear();
         }
     }
 
@@ -170,6 +185,28 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
     /// </summary>
     private void DispatchBatchForProcessing(List<TextChunk> batch, CancellationToken ct)
     {
+        if (_isExperimentMode)
+        {
+            // In experiment mode, process each chunk as a single line with experiment handling
+            var requests = batch.ConvertAll(chunk =>
+            {
+                var request = new InferenceRequest(
+                    chunk.Id,
+                    chunk.Content,
+                    chunk.ExtraContext,
+                    new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously),
+                    Iteration: 0,
+                    PrePromptKind: PrePromptKind.Write
+                );
+
+                _ = ProcessExperimentRequest(request, chunk.Content, ct);
+                return request;
+            });
+
+            executor.EnqueueRequests(requests);
+            return;
+        }
+
         // 1. Create an InferenceRequest for each chunk.
         //    We need to keep the original chunk associated with its request.
         var requestsWithSource = batch.ConvertAll(chunk =>
@@ -259,6 +296,173 @@ public class WorkProcessor(IWorkProvider workProvider, IHubContext<WorkHub> hubC
 
             await BroadcastStatus();
         }
+    }
+
+    /// <summary>
+    /// Processes an experiment request and handles the state machine for judgment/correction cycles.
+    /// </summary>
+    private async Task ProcessExperimentRequest(InferenceRequest request, string lineContent, CancellationToken ct)
+    {
+        var lineHash = lineContent.GetHashCode().ToString("X8");
+        _experimentWork[request.Id] = ("Queued", "", 0, request.Iteration, request.PrePromptKind);
+        await BroadcastExperimentStatus();
+
+        try
+        {
+            await request.Tcs.Task.ContinueWith(async completedTask =>
+            {
+                try
+                {
+                    string response;
+                    string status;
+
+                    if (completedTask.IsFaulted)
+                    {
+                        logger.LogError(completedTask.Exception, "Experiment request {Id} (iteration {Iteration}, kind {Kind}) failed.", request.Id, request.Iteration, request.PrePromptKind);
+                        status = "Failed: " + (completedTask.Exception?.InnerException?.Message ?? "Unknown error");
+                        response = "";
+                        _experimentWork[request.Id] = (status, response, 0, request.Iteration, request.PrePromptKind);
+                        await BroadcastExperimentStatus();
+                        return;
+                    }
+
+                    if (completedTask.IsCanceled)
+                    {
+                        status = "Cancelled";
+                        response = "";
+                        _experimentWork[request.Id] = (status, response, 0, request.Iteration, request.PrePromptKind);
+                        logger.LogWarning("Experiment request {Id} (iteration {Iteration}, kind {Kind}) was canceled.", request.Id, request.Iteration, request.PrePromptKind);
+                        await BroadcastExperimentStatus();
+                        return;
+                    }
+
+                    response = await completedTask;
+                    status = $"Step {request.Iteration} {request.PrePromptKind} complete";
+                    _experimentWork[request.Id] = (status, response, 0, request.Iteration, request.PrePromptKind);
+                    await BroadcastExperimentStatus();
+
+                    // Route based on iteration parity
+                    if (request.Iteration == 0)
+                    {
+                        // Initial generation (Write) -> queue for judgment (Judgment)
+                        await _experimentStorage.SaveAsync(lineHash, lineContent, request, response);
+
+                        var judgmentContent = $"Original line:\n{lineContent}\n\nGenerated response:\n{response}\n\nEvaluate this response based on the criteria.";
+                        var judgmentRequest = new InferenceRequest(
+                            Id: request.Id * -1,
+                            Prompt: judgmentContent,
+                            ExtraContext: null,
+                            Tcs: new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously),
+                            Iteration: 1,
+                            PrePromptKind: PrePromptKind.Judgment
+                        );
+
+                        _ = ProcessExperimentRequest(judgmentRequest, lineHash, ct);
+                        executor.EnqueueRequests([judgmentRequest]);
+                    }
+                    else if (request.Iteration % 2 == 1)
+                    {
+                        // Judgment step - save feedback, queue correction if not max iterations
+                        await _experimentStorage.SaveAsync(lineHash, lineContent, request, response);
+
+                        if (request.Iteration >= _maxIterations)
+                        {
+                            // Max iterations reached, mark as done
+                            status = "Max iterations reached";
+                            _experimentWork[request.Id] = (status, response, 0, request.Iteration, request.PrePromptKind);
+                            await BroadcastExperimentStatus();
+                            await _experimentStorage.SaveFinalAsync(request, response);
+                            return;
+                        }
+
+                        // Get the latest non-judgment response for correction
+                        var lastResponse = await _experimentStorage.GetLatestNonJudgmentAsync(lineHash);
+                        if (lastResponse != null)
+                        {
+                            var correctionContent = $"Original line:\n{lineContent}\n\nPrevious response:\n{lastResponse.Response}\n\nJudge feedback:\n{response}\n\nImprove the response based on the feedback.";
+                            var correctionRequest = new InferenceRequest(
+                                Id: request.Id * -1,
+                                Prompt: correctionContent,
+                                ExtraContext: null,
+                                Tcs: new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously),
+                                Iteration: request.Iteration + 1,
+                                PrePromptKind: PrePromptKind.Correction
+                            );
+
+                            _ = ProcessExperimentRequest(correctionRequest, lineHash, ct);
+                            executor.EnqueueRequests([correctionRequest]);
+                        }
+                    }
+                    else
+                    {
+                        // Correction step (even >= 2) - save response, queue judgment
+                        await _experimentStorage.SaveAsync(lineHash, lineContent, request, response);
+
+                        if (request.Iteration >= _maxIterations)
+                        {
+                            // Max iterations reached, mark as done
+                            status = "Max iterations reached";
+                            _experimentWork[request.Id] = (status, response, 0, request.Iteration, request.PrePromptKind);
+                            await BroadcastExperimentStatus();
+                            await _experimentStorage.SaveFinalAsync(request, response);
+                            return;
+                        }
+
+                        var judgmentRequest = new InferenceRequest(
+                            Id: request.Id * -1,
+                            Prompt: $"Original line:\n{lineContent}\n\nCorrected response:\n{response}\n\nEvaluate this corrected response based on the criteria.",
+                            ExtraContext: null,
+                            Tcs: new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously),
+                            Iteration: request.Iteration + 1,
+                            PrePromptKind: PrePromptKind.Judgment
+                        );
+
+                        _ = ProcessExperimentRequest(judgmentRequest, lineHash, ct);
+                        executor.EnqueueRequests([judgmentRequest]);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Error processing experiment request {Id} (iteration {Iteration}, kind {Kind}).", request.Id, request.Iteration, request.PrePromptKind);
+                    _experimentWork[request.Id] = ("Failed: Internal error", "", 0, request.Iteration, request.PrePromptKind);
+                    await BroadcastExperimentStatus();
+                }
+                finally
+                {
+                    // Remove the finished item from the display/tracking dictionary after a slight delay.
+                    await Task.Delay(5000, ct);
+                    _experimentWork.TryRemove(request.Id, out _);
+                    await BroadcastExperimentStatus();
+                }
+            }, ct, TaskContinuationOptions.None, TaskScheduler.Default);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Error setting up experiment request {Id} (iteration {Iteration}, kind {Kind}).", request.Id, request.Iteration, request.PrePromptKind);
+            _experimentWork[request.Id] = ("Failed: Setup error", "", 0, request.Iteration, request.PrePromptKind);
+            await BroadcastExperimentStatus();
+        }
+    }
+
+    private async Task BroadcastExperimentStatus()
+    {
+        var workItems = _experimentWork.Where(p => p.Value.Status != "Queued")
+            .Select(kv => new
+            {
+                id = kv.Key,
+                status = kv.Value.Status,
+                response = kv.Value.Response,
+                rewindChars = kv.Value.RewindChars,
+                iteration = kv.Value.Iteration,
+                kind = kv.Value.Kind.ToString()
+            });
+
+        await hubContext.Clients.All.SendAsync("UpdateExperimentStatus",
+            ProcessedCount,
+            workProvider.GetRemainingCount(),
+            workItems,
+            TokensPerSecond,
+            TotalTokensProcessed);
     }
 
     private async Task BroadcastStatus()

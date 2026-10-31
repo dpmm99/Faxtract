@@ -3,10 +3,11 @@ using Faxtract.Models;
 using Faxtract.Services;
 using HtmlAgilityPack;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 
 namespace Faxtract.Controllers
 {
-    public class HomeController(IWorkProvider workProvider, StorageService storageService) : Controller
+    public class HomeController(IWorkProvider workProvider, StorageService storageService, ExperimentStorageService experimentStorage, IConfiguration configuration) : Controller
     {
         public IActionResult Index()
         {
@@ -173,6 +174,34 @@ namespace Faxtract.Controllers
             {
                 FileDownloadName = $"flashcards-{DateTime.Now:yyyy-MM-dd}.csv"
             };
+        }
+
+        [HttpGet]
+        public IActionResult GetExperimentModeStatus()
+        {
+            var isExperimentMode = configuration.GetValue("LLamaConfig:LlmAsJudge", false);
+            return Json(new { IsExperimentMode = isExperimentMode });
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetExperimentSteps([FromQuery] string lineHash)
+        {
+            var steps = await experimentStorage.GetAllAsync(lineHash);
+            return Json(steps);
+        }
+
+        [HttpGet]
+        public async Task<IActionResult> GetAllExperimentLineHashes()
+        {
+            var hashes = await experimentStorage.GetAllLineHashesAsync();
+            return Json(hashes);
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> DeleteExperimentData([FromQuery] string lineHash)
+        {
+            await experimentStorage.DeleteAsync(lineHash);
+            return StatusCode(200);
         }
 
         /// <summary>
