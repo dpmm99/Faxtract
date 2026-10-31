@@ -32,6 +32,7 @@ public class Program
         builder.Services.AddSingleton<WorkProcessor>();
         builder.Services.AddSingleton<LlamaExecutor>();
         builder.Services.AddSingleton<StorageService>();
+        builder.Services.AddSingleton<ExperimentStorageService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<WorkProcessor>());
         NativeLibraryConfig.All
             .WithVulkan(builder.Configuration.GetValue<bool>("LLamaConfig:AllowVulkan"))

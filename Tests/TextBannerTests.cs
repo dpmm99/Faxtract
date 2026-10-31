@@ -24,16 +24,16 @@ public class TextBannerTests
     public static void ClassInitialize(TestContext context)
     {
         // Load the model vocab once for all tests in this class.
-        //var modelParams = new ModelParams(@"C:\AI\Qwen2.5-0.5B-Instruct-Q6_K.gguf") { VocabOnly = true };
+        //var modelParams = new ModelParams(@"/mnt/c/AI/Qwen2.5-0.5B-Instruct-Q6_K.gguf") { VocabOnly = true };
         //Trying with different models.
-        //var modelParams = new ModelParams(@"C:\AI\Llama-3.2-1B-Instruct-Q6_K.gguf") { VocabOnly = true };
-        //var modelParams = new ModelParams(@"C:\AI\MiniCPM-o-7.6B-Q6_K.gguf") { VocabOnly = true };
-        var modelParams = new ModelParams(@"C:\AI\Magistral-Small-2509-UD-Q5_K_XL.gguf") { VocabOnly = true };
+        //var modelParams = new ModelParams(@"/mnt/c/AI/Llama-3.2-1B-Instruct-Q6_K.gguf") { VocabOnly = true };
+        //var modelParams = new ModelParams(@"/mnt/c/AI/MiniCPM-o-7.6B-Q6_K.gguf") { VocabOnly = true };
+        var modelParams = new ModelParams(@"/mnt/c/AI/Spark-X2.6-4B-Q8_0.gguf") { VocabOnly = true };
 
         _model = LLamaWeights.LoadFromFile(modelParams);
     }
 
-    [ClassCleanup(ClassCleanupBehavior.EndOfClass)]
+    [ClassCleanup]
     public static void ClassCleanup()
     {
         _model?.Dispose();

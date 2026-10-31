@@ -11,24 +11,24 @@
         "LLAMA_PRESET": "Phi-4"
       }
     },
-    "Qwen3-30B-A3B": {
+    "MuseGlimmer-30B": {
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
       "applicationUrl": "https://localhost:7193;http://localhost:5155",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
-        "LLAMA_PRESET": "Qwen3-30B-A3B"
+        "LLAMA_PRESET": "MuseGlimmer-30B"
       }
     },
-    "Qwen3.6-35B-A3B": {
+    "Gemma4-26B": {
       "commandName": "Project",
       "dotnetRunMessages": true,
       "launchBrowser": true,
       "applicationUrl": "https://localhost:7193;http://localhost:5155",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
-        "LLAMA_PRESET": "Qwen3.6-35B-A3B"
+        "LLAMA_PRESET": "Gemma4-26B"
       }
     },
     "LlmAsJudge-Phi-4": {
